@@ -1,6 +1,7 @@
 .env
 API.txt
 data/*.db
+!data/ichiba_ranking.db
 output/*.png
 __pycache__/
 *.pyc
