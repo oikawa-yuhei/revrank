@@ -1,0 +1,303 @@
+<!DOCTYPE html>
+<html lang="ja">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>RevRank — 口コミスコアで選ぶ、本当のランキング</title>
+<meta name="description" content="楽天市場の口コミ件数と評価点から独自スコアを算出し、売れ筋とは異なる本当の評価ランキングを29ジャンルで提供。">
+<meta name="robots" content="index,follow">
+<link rel="canonical" href="https://oikawa-yuhei.github.io/revrank/">
+<style>
+
+:root {
+  --bg:#F4F6FB; --sur:#FFF; --ink:#0F172A; --ink2:#475569; --ink3:#94A3B8;
+  --acc:#2563EB; --bdr:#E2E8F0; --gold:#F59E0B; --up:#16A34A; --dn:#DC2626;
+  --shd:0 1px 3px rgba(0,0,0,.07),0 4px 16px rgba(0,0,0,.05);
+  --r:10px; --sans:-apple-system,'Hiragino Kaku Gothic ProN','Hiragino Sans',sans-serif;
+  --mono:'SF Mono',Consolas,monospace;
+}
+@media(prefers-color-scheme:dark){:root:not([data-theme="light"]){
+  --bg:#0B1120;--sur:#111827;--ink:#F1F5F9;--ink2:#94A3B8;--ink3:#475569;
+  --acc:#60A5FA;--bdr:#1E293B;--gold:#FCD34D;--up:#4ADE80;--dn:#F87171;
+  --shd:0 1px 3px rgba(0,0,0,.3),0 4px 16px rgba(0,0,0,.25);
+}}
+:root[data-theme="dark"]{
+  --bg:#0B1120;--sur:#111827;--ink:#F1F5F9;--ink2:#94A3B8;--ink3:#475569;
+  --acc:#60A5FA;--bdr:#1E293B;--gold:#FCD34D;--up:#4ADE80;--dn:#F87171;
+  --shd:0 1px 3px rgba(0,0,0,.3),0 4px 16px rgba(0,0,0,.25);
+}
+*,*::before,*::after{box-sizing:border-box;margin:0;padding:0}
+html{scroll-behavior:smooth}
+body{background:var(--bg);color:var(--ink);font-family:var(--sans);font-size:15px;line-height:1.6;min-height:100vh}
+a{color:inherit;text-decoration:none} img{display:block;max-width:100%}
+button{cursor:pointer;border:none;background:none;font:inherit;color:inherit}
+
+/* NAV */
+.nav{background:var(--sur);border-bottom:1px solid var(--bdr);position:sticky;top:0;z-index:100}
+.nav-in{max-width:1080px;margin:0 auto;padding:0 20px;height:52px;display:flex;align-items:center;gap:12px}
+.nav-logo{font-size:16px;font-weight:900;letter-spacing:-.03em;color:var(--acc)}
+.nav-logo span{color:var(--ink2);font-weight:400;font-size:12px;margin-left:4px}
+.nav-sep{width:1px;height:16px;background:var(--bdr);flex-shrink:0}
+.nav-genre{font-size:13px;font-weight:700;color:var(--ink2);overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.nav-date{margin-left:auto;font-family:var(--mono);font-size:11px;color:var(--ink3);white-space:nowrap}
+.nav-live{display:inline-flex;align-items:center;gap:4px;font-size:10px;font-weight:700;
+  color:var(--acc);font-family:var(--mono);margin-left:6px}
+.nav-live::before{content:'';width:6px;height:6px;border-radius:50%;background:var(--acc);
+  animation:pulse 1.8s ease-in-out infinite}
+@keyframes pulse{0%,100%{opacity:1}50%{opacity:.3}}
+
+/* BREADCRUMB */
+.bc{max-width:1080px;margin:0 auto;padding:12px 20px 0;font-size:12px;color:var(--ink3);display:flex;gap:6px}
+.bc a{color:var(--acc)}.bc-sep{opacity:.4}
+
+/* HERO */
+.hero{background:var(--sur);border-bottom:1px solid var(--bdr);padding:40px 20px 36px}
+.hero-in{max-width:1080px;margin:0 auto}
+.eyebrow{font-size:11px;font-weight:700;letter-spacing:.1em;text-transform:uppercase;color:var(--acc);margin-bottom:10px}
+.h1{font-size:32px;font-weight:900;letter-spacing:-.04em;line-height:1.15;margin-bottom:8px}
+.h1 em{font-style:normal;color:var(--acc)}
+.hero-sub{font-size:14px;color:var(--ink2);max-width:560px;line-height:1.7}
+.hero-badges{display:flex;flex-wrap:wrap;gap:8px;margin-top:16px}
+.hbadge{display:inline-flex;align-items:center;gap:5px;font-size:11px;font-weight:600;
+  padding:4px 10px;border-radius:99px;border:1px solid var(--bdr);color:var(--ink2);background:var(--bg)}
+.hbadge.a{border-color:var(--acc);color:var(--acc);background:rgba(37,99,235,.07)}
+.hbadge.m{font-family:var(--mono)}
+
+/* FORMULA BAND */
+.fband{background:linear-gradient(135deg,rgba(37,99,235,.07),rgba(37,99,235,.02));
+  border:1px solid rgba(37,99,235,.18);border-radius:var(--r);
+  padding:14px 18px;margin-top:22px;display:flex;align-items:center;gap:14px;flex-wrap:wrap}
+.fform{font-family:var(--mono);font-size:13px;color:var(--acc);font-weight:700;white-space:nowrap}
+.fdesc{font-size:12px;color:var(--ink2);line-height:1.5}
+
+/* CHART SECTION */
+.chart-sec{max-width:1080px;margin:32px auto 0;padding:0 20px}
+.chart-hdr{display:flex;align-items:center;justify-content:space-between;margin-bottom:12px;flex-wrap:wrap;gap:8px}
+.chart-ttl{font-size:14px;font-weight:700;color:var(--ink2)}
+.chart-note{font-size:11px;color:var(--ink3);font-family:var(--mono)}
+.chart-sub{font-size:11px;color:var(--ink3);font-family:var(--mono);margin-bottom:10px;padding:6px 10px;background:var(--bg);border-radius:6px;display:inline-block}
+.chart-tabs{display:flex;gap:4px}
+.ctab{padding:5px 14px;border-radius:99px;font-size:12px;font-weight:600;
+  border:1px solid var(--bdr);color:var(--ink3);cursor:pointer;transition:all .12s}
+.ctab.on{border-color:var(--acc);color:var(--acc);background:rgba(37,99,235,.08)}
+.chart-box{background:var(--bg);border:1px solid var(--bdr);border-radius:var(--r);
+  padding:18px;overflow-x:auto;position:relative}
+.cr-chart{display:block;min-width:300px}
+.bc{cursor:pointer;transition:opacity .1s,r .1s}
+.bc:hover{opacity:1 !important}
+.ts-legend{display:flex;flex-wrap:wrap;gap:10px;margin-top:10px}
+.ts-leg-item{display:flex;align-items:center;gap:5px;font-size:11px;color:var(--ink2)}
+.ts-dot{width:8px;height:8px;border-radius:50%;flex-shrink:0}
+
+/* BUBBLE TOOLTIP */
+#btip{position:fixed;pointer-events:none;display:none;z-index:999;
+  background:var(--sur);border:1px solid var(--bdr);border-radius:10px;
+  padding:10px 14px;font-size:12px;box-shadow:var(--shd);max-width:220px;line-height:1.6}
+
+/* BEST3 SECTION */
+.best3-sec{max-width:1080px;margin:28px auto 0;padding:0 20px}
+.best3-hd{font-size:13px;font-weight:700;color:var(--ink2);letter-spacing:.05em;
+  text-transform:uppercase;display:flex;align-items:center;gap:10px;margin-bottom:14px}
+.best3-hd::after{content:'';flex:1;height:1px;background:var(--bdr)}
+.best3-hd .live-tag{font-size:9px;font-weight:700;color:var(--acc);font-family:var(--mono);
+  border:1px solid var(--acc);border-radius:3px;padding:0 4px;letter-spacing:.05em}
+
+/* PODIUM */
+.podium{display:grid;grid-template-columns:1fr 1fr 1fr;gap:14px}
+@media(max-width:600px){.podium{grid-template-columns:1fr}}
+.pcard{background:var(--sur);border:1px solid var(--bdr);border-radius:var(--r);
+  overflow:hidden;display:flex;flex-direction:column;box-shadow:var(--shd);
+  transition:transform .15s,box-shadow .15s}
+.pcard:hover{transform:translateY(-3px);box-shadow:0 8px 30px rgba(0,0,0,.12)}
+.pcard.p1{border-color:var(--gold);box-shadow:0 0 0 1.5px var(--gold),var(--shd)}
+.pimg{position:relative;aspect-ratio:1/1;background:var(--bg);overflow:hidden;
+  display:flex;align-items:center;justify-content:center}
+.pimg img{width:100%;height:100%;object-fit:cover}
+.pfallback{font-size:56px;line-height:1}
+.pnum{position:absolute;top:10px;left:10px;font-family:var(--mono);font-size:12px;
+  font-weight:700;color:#fff;padding:3px 8px;border-radius:5px;line-height:1.4}
+.pn1{background:var(--gold);color:#1a1200;font-size:14px}
+.pn2{background:var(--acc)}
+.pn3{background:#60A5FA}
+.pbody{padding:14px 14px 16px;flex:1;display:flex;flex-direction:column;gap:5px}
+.pname{font-size:13px;font-weight:700;line-height:1.4;
+  display:-webkit-box;-webkit-line-clamp:2;-webkit-box-orient:vertical;overflow:hidden}
+.pdesc{font-size:11px;color:var(--ink2);line-height:1.5;
+  display:-webkit-box;-webkit-line-clamp:2;-webkit-box-orient:vertical;overflow:hidden}
+.pshop{font-size:11px;color:var(--ink3)}
+.pfoot{display:flex;align-items:baseline;justify-content:space-between;
+  margin-top:auto;padding-top:8px;gap:8px}
+.pprice{font-family:var(--mono);font-size:16px;font-weight:700}
+.pprice.live-ok::after{content:'LIVE';font-size:8px;font-weight:700;
+  color:var(--acc);margin-left:4px;vertical-align:super}
+.sc.live-rc{transition:color .3s}
+.sc.live-rc-flash{color:var(--up)}
+.pprice.live-loading{opacity:.5}
+.prk{font-family:var(--mono);font-size:10px;color:var(--ink3)}
+
+/* GRID */
+.sec{max-width:1080px;margin:32px auto 0;padding:0 20px}
+.sec-hd{font-size:13px;font-weight:700;color:var(--ink2);letter-spacing:.05em;
+  text-transform:uppercase;display:flex;align-items:center;gap:10px;margin-bottom:14px}
+.sec-hd::after{content:'';flex:1;height:1px;background:var(--bdr)}
+.cgrid{display:grid;grid-template-columns:repeat(5,1fr);gap:12px}
+@media(max-width:960px){.cgrid{grid-template-columns:repeat(4,1fr)}}
+@media(max-width:680px){.cgrid{grid-template-columns:repeat(3,1fr);gap:8px}}
+@media(max-width:440px){.cgrid{grid-template-columns:repeat(2,1fr)}}
+.card{background:var(--sur);border:1px solid var(--bdr);border-radius:var(--r);
+  overflow:hidden;display:flex;flex-direction:column;
+  transition:transform .15s,box-shadow .15s,border-color .15s}
+.card:hover{transform:translateY(-2px);box-shadow:var(--shd);border-color:var(--acc)}
+.card.no-data{opacity:.45}
+.cimg{position:relative;aspect-ratio:1/1;background:var(--bg);overflow:hidden;
+  display:flex;align-items:center;justify-content:center}
+.cimg img{width:100%;height:100%;object-fit:cover}
+.cfallback{font-size:36px;line-height:1}
+.cnum{position:absolute;top:7px;left:7px;font-family:var(--mono);font-size:11px;
+  font-weight:700;color:#fff;padding:2px 6px;border-radius:4px;background:rgba(15,23,42,.5)}
+.cbody{padding:9px 10px 11px;display:flex;flex-direction:column;gap:3px;flex:1}
+.cname{font-size:11px;font-weight:600;line-height:1.45;
+  display:-webkit-box;-webkit-line-clamp:2;-webkit-box-orient:vertical;overflow:hidden}
+.cdesc{font-size:10px;color:var(--ink2);line-height:1.4;
+  display:-webkit-box;-webkit-line-clamp:2;-webkit-box-orient:vertical;overflow:hidden}
+.cshop{font-size:10px;color:var(--ink3);white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.cfoot{margin-top:auto;padding-top:4px;display:flex;flex-direction:column;gap:1px}
+.cprice{font-family:var(--mono);font-size:13px;font-weight:700}
+.crk{font-family:var(--mono);font-size:10px;color:var(--ink3)}
+
+/* STARS */
+.stars-row{display:flex;align-items:center;gap:5px}
+.stars-row.sm{gap:3px}
+.sw{position:relative;display:inline-block;font-size:14px;line-height:1;letter-spacing:2px}
+.stars-row.sm .sw{font-size:11px;letter-spacing:1px}
+.sb{color:var(--bdr)}
+.sf{position:absolute;top:0;left:0;overflow:hidden;white-space:nowrap;color:var(--gold);letter-spacing:2px}
+.stars-row.sm .sf{letter-spacing:1px}
+.sn{font-family:var(--mono);font-size:12px;font-weight:700;color:var(--ink2)}
+.stars-row.sm .sn{font-size:10px}
+.sc{font-family:var(--mono);font-size:11px;color:var(--ink3)}
+.stars-row.sm .sc{font-size:10px}
+.no-rev{font-size:10px;color:var(--ink3);font-family:var(--mono)}
+
+/* SPARK */
+.spark{position:absolute;bottom:0;left:0;right:0;height:24px;
+  background:linear-gradient(transparent,rgba(0,0,0,.3))}
+.spark svg{display:block;width:100%;height:20px;margin-top:4px}
+
+/* BADGES */
+.badge-hot{display:inline-flex;align-items:center;gap:3px;
+  font-size:9px;font-weight:700;padding:1px 6px;border-radius:3px;
+  background:#FEF3C7;color:#92400E;border:1px solid #FDE68A;margin-bottom:2px}
+
+/* UP/DOWN */
+.up{color:var(--up);font-weight:700}.dn{color:var(--dn);font-weight:700}
+
+/* HERO CHART */
+.hero-chart{display:block;width:100%}
+.hc-tabs{display:flex;gap:4px;flex-wrap:wrap;margin-top:20px;margin-bottom:10px}
+.hctab{padding:5px 14px;border-radius:99px;font-size:12px;font-weight:600;
+  border:1px solid var(--bdr);color:var(--ink3);cursor:pointer;
+  transition:all .12s;background:none;font-family:var(--sans)}
+.hctab.on{border-color:var(--acc);color:var(--acc);background:rgba(37,99,235,.08)}
+.hero-chart-box{background:var(--bg);border:1px solid var(--bdr);border-radius:var(--r);
+  padding:14px;overflow-x:auto}
+.hero-chips{display:flex;flex-wrap:wrap;gap:8px;margin-top:12px}
+.hchip{display:inline-flex;align-items:center;gap:6px;font-size:11px;font-weight:600;
+  padding:4px 12px 4px 8px;border-radius:99px;background:var(--bg);
+  border:1px solid var(--bdr);color:var(--ink2)}
+.hchip-dot{width:8px;height:8px;border-radius:50%;flex-shrink:0}
+
+/* TREND DASHBOARD */
+.trend-sec{background:var(--sur);border-top:1px solid var(--bdr);border-bottom:1px solid var(--bdr);padding:22px 20px}
+.trend-in{max-width:1080px;margin:0 auto}
+.trend-hd{font-size:11px;font-weight:700;letter-spacing:.09em;text-transform:uppercase;color:var(--ink2);
+  display:flex;align-items:center;gap:10px;margin-bottom:12px}
+.trend-hd::after{content:'';flex:1;height:1px;background:var(--bdr)}
+.trend-grid{display:grid;grid-template-columns:repeat(3,1fr);gap:12px}
+@media(max-width:680px){.trend-grid{grid-template-columns:1fr}}
+.td-panel{background:var(--bg);border:1px solid var(--bdr);border-radius:var(--r);padding:14px 14px 10px;display:flex;flex-direction:column;gap:0}
+.td-ptitle{font-size:12px;font-weight:700;color:var(--ink2);margin-bottom:8px}
+.td-card{display:flex;align-items:center;gap:9px;padding:7px 0;border-bottom:1px solid var(--bdr);transition:opacity .1s}
+.td-card:last-child{border-bottom:none;padding-bottom:0}
+.td-card:hover{opacity:.78}
+.td-info{min-width:0;flex:1}
+.td-name{font-size:11px;font-weight:600;color:var(--ink);white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.td-stat{font-size:10px;font-family:var(--mono);color:var(--ink3);margin-top:1px}
+.td-stat.up{color:var(--up);font-weight:700}
+.td-empty{font-size:11px;color:var(--ink3);padding:10px 0;text-align:center;font-family:var(--mono)}
+.td-chart-dot{width:7px;height:7px;border-radius:50%;flex-shrink:0;margin-right:2px;opacity:.85}
+
+/* ANIMATION */
+.anim-ctrl{display:flex;align-items:center;gap:10px;margin-bottom:12px;flex-wrap:wrap}
+.anim-btn{padding:5px 18px;border-radius:99px;font-size:12px;font-weight:700;
+  border:1.5px solid var(--acc);color:var(--acc);background:rgba(37,99,235,.07);
+  cursor:pointer;transition:background .12s}
+.anim-btn:hover{background:rgba(37,99,235,.16)}
+.anim-date{font-family:var(--mono);font-size:12px;color:var(--ink3);white-space:nowrap;flex-shrink:0}
+input[type=range]{accent-color:var(--acc)}
+
+/* RELATED */
+.related{max-width:1080px;margin:36px auto 0;padding:0 20px 60px}
+.rel-hd{font-size:13px;font-weight:700;color:var(--ink2);letter-spacing:.05em;
+  text-transform:uppercase;display:flex;align-items:center;gap:10px;margin-bottom:14px}
+.rel-hd::after{content:'';flex:1;height:1px;background:var(--bdr)}
+.rel-grid{display:flex;flex-wrap:wrap;gap:8px}
+.rpill{display:inline-flex;align-items:center;gap:6px;padding:8px 16px;
+  border-radius:99px;font-size:13px;font-weight:600;border:1px solid var(--bdr);
+  color:var(--ink2);background:var(--sur);transition:border-color .12s,color .12s,background .12s}
+.rpill:hover{border-color:var(--acc);color:var(--acc);background:rgba(37,99,235,.06)}
+
+/* NO-REV DIVIDER */
+.norev-hd{margin:24px 0 12px;font-size:12px;font-weight:600;color:var(--ink3);
+  display:flex;align-items:center;gap:8px}
+.norev-hd::before,.norev-hd::after{content:'';flex:1;height:1px;background:var(--bdr)}
+
+/* FOOTER */
+.footer{background:var(--sur);border-top:1px solid var(--bdr);padding:24px 20px;
+  text-align:center;font-size:11px;color:var(--ink3);line-height:2}
+.footer a{color:var(--acc)}
+
+@media(max-width:480px){.h1{font-size:24px}.podium{grid-template-columns:1fr}.fband{flex-direction:column;align-items:flex-start}}
+
+.top-hero{background:var(--sur);border-bottom:1px solid var(--bdr);
+  padding:72px 20px 60px;text-align:center}
+.top-in{max-width:680px;margin:0 auto}
+.top-logo{font-size:48px;font-weight:900;letter-spacing:-.06em;color:var(--acc);margin-bottom:6px}
+.top-sub{font-size:16px;color:var(--ink2);line-height:1.7;margin-bottom:22px}
+.idx{max-width:1080px;margin:40px auto 60px;padding:0 20px}
+.icat{margin-bottom:36px}
+.ich{font-size:13px;font-weight:700;color:var(--ink2);letter-spacing:.06em;text-transform:uppercase;
+  display:flex;align-items:center;gap:10px;margin-bottom:14px}
+.ich::after{content:'';flex:1;height:1px;background:var(--bdr)}
+.igrid{display:grid;grid-template-columns:repeat(auto-fill,minmax(160px,1fr));gap:10px}
+.ic{background:var(--sur);border:1px solid var(--bdr);border-radius:var(--r);
+  padding:16px;display:flex;flex-direction:column;gap:4px;
+  transition:border-color .12s,box-shadow .12s,transform .12s}
+.ic:hover{border-color:var(--acc);box-shadow:var(--shd);transform:translateY(-2px)}
+.ie{font-size:28px;line-height:1;margin-bottom:2px}
+.il{font-size:13px;font-weight:700;color:var(--ink);line-height:1.3}
+.in{font-size:11px;color:var(--ink3);font-family:var(--mono)}
+</style>
+</head>
+<body>
+<nav class="nav"><div class="nav-in">
+  <span class="nav-logo">RevRank<span>口コミスコアランキング</span></span>
+  <span class="nav-date">None 更新</span>
+</div></nav>
+<header class="top-hero"><div class="top-in">
+  <div class="top-logo">RevRank</div>
+  <p class="top-sub">「ランキング1位！」「送料無料！」ではなく、<br>
+  <strong>口コミの質と量</strong>だけで並べた本当のランキング。</p>
+  <div class="hero-badges" style="justify-content:center">
+    <span class="hbadge a">29ジャンル収録</span>
+    <span class="hbadge">楽天公式とは別集計</span>
+    <span class="hbadge m">None 更新</span>
+  </div>
+</div></header>
+<main class="idx"><div class="icat"><h2 class="ich">ランニング</h2><div class="igrid"><a class="ic" href="running-shoes/"><span class="ie">👟</span><span class="il">ランニングシューズ</span><span class="in">0件収録</span></a><a class="ic" href="running-watch/"><span class="ie">⌚</span><span class="il">ランニングウォッチ・GPS</span><span class="in">0件収録</span></a></div></div><div class="icat"><h2 class="ich">ゴルフ</h2><div class="igrid"><a class="ic" href="golf-club/"><span class="ie">⛳</span><span class="il">ゴルフクラブ</span><span class="in">0件収録</span></a><a class="ic" href="golf-ball/"><span class="ie">⛳</span><span class="il">ゴルフボール</span><span class="in">0件収録</span></a><a class="ic" href="golf-shoes/"><span class="ie">⛳</span><span class="il">ゴルフシューズ</span><span class="in">0件収録</span></a><a class="ic" href="golf-bag/"><span class="ie">⛳</span><span class="il">ゴルフバッグ</span><span class="in">0件収録</span></a></div></div><div class="icat"><h2 class="ich">フィットネスマシン</h2><div class="igrid"><a class="ic" href="treadmill/"><span class="ie">🏃</span><span class="il">ランニングマシン</span><span class="in">0件収録</span></a><a class="ic" href="fitness-bike/"><span class="ie">🚴</span><span class="il">フィットネスバイク</span><span class="in">0件収録</span></a><a class="ic" href="stepper/"><span class="ie">🏋️</span><span class="il">ステッパー</span><span class="in">0件収録</span></a></div></div><div class="icat"><h2 class="ich">ウェイトトレーニング</h2><div class="igrid"><a class="ic" href="dumbbell/"><span class="ie">🏋️</span><span class="il">ダンベル</span><span class="in">0件収録</span></a><a class="ic" href="barbell/"><span class="ie">🏋️</span><span class="il">バーベル</span><span class="in">0件収録</span></a><a class="ic" href="kettlebell/"><span class="ie">🏋️</span><span class="il">ケトルベル</span><span class="in">0件収録</span></a></div></div><div class="icat"><h2 class="ich">アウトドア</h2><div class="igrid"><a class="ic" href="tent/"><span class="ie">⛺</span><span class="il">テント</span><span class="in">0件収録</span></a><a class="ic" href="tarp/"><span class="ie">⛺</span><span class="il">タープ</span><span class="in">0件収録</span></a><a class="ic" href="outdoor-bedding/"><span class="ie">🏕️</span><span class="il">アウトドア用寝具</span><span class="in">0件収録</span></a><a class="ic" href="camp-chair/"><span class="ie">🪑</span><span class="il">キャンプチェア・テーブル</span><span class="in">0件収録</span></a><a class="ic" href="bbq-grill/"><span class="ie">🔥</span><span class="il">バーベキューコンロ</span><span class="in">0件収録</span></a><a class="ic" href="camp-stove/"><span class="ie">🔥</span><span class="il">キャンプバーナー</span><span class="in">0件収録</span></a><a class="ic" href="bonfire/"><span class="ie">🔥</span><span class="il">焚き火台</span><span class="in">0件収録</span></a></div></div><div class="icat"><h2 class="ich">ウィンタースポーツ</h2><div class="igrid"><a class="ic" href="ski/"><span class="ie">⛷️</span><span class="il">スキー板</span><span class="in">0件収録</span></a><a class="ic" href="ski-boots/"><span class="ie">⛷️</span><span class="il">スキーブーツ</span><span class="in">0件収録</span></a><a class="ic" href="snowboard/"><span class="ie">🏂</span><span class="il">スノーボード</span><span class="in">0件収録</span></a><a class="ic" href="snowboard-boots/"><span class="ie">🏂</span><span class="il">スノーボードブーツ</span><span class="in">0件収録</span></a></div></div><div class="icat"><h2 class="ich">寝具</h2><div class="igrid"><a class="ic" href="mattress/"><span class="ie">🛏️</span><span class="il">マットレス</span><span class="in">0件収録</span></a><a class="ic" href="bed-frame/"><span class="ie">🛌</span><span class="il">ベッドフレーム</span><span class="in">0件収録</span></a><a class="ic" href="leg-mattress/"><span class="ie">🛌</span><span class="il">脚付きマットレス</span><span class="in">0件収録</span></a></div></div><div class="icat"><h2 class="ich">子育て</h2><div class="igrid"><a class="ic" href="stroller/"><span class="ie">👶</span><span class="il">ベビーカー</span><span class="in">0件収録</span></a><a class="ic" href="child-seat/"><span class="ie">🚗</span><span class="il">チャイルドシート</span><span class="in">0件収録</span></a></div></div><div class="icat"><h2 class="ich">登山</h2><div class="igrid"><a class="ic" href="climbing-shoes/"><span class="ie">🧗</span><span class="il">登山・クライミングシューズ</span><span class="in">0件収録</span></a></div></div><div class="icat"><h2 class="ich">自転車</h2><div class="igrid"><a class="ic" href="e-bike/"><span class="ie">🚲</span><span class="il">電動アシスト自転車</span><span class="in">0件収録</span></a></div></div></main>
+<footer class="footer">
+  <p>楽天市場のレビューデータをもとに独自スコアで並べ替えたランキングです。本ページには楽天アフィリエイトリンクが含まれます。</p>
+  <p>© 2026 RevRank</p>
+</footer>
+</body>
+</html>
