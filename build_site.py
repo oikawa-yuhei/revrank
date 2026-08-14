@@ -1210,6 +1210,32 @@ def build_genre_page(key, items):
         "numberOfItems":len(scored),"itemListElement":ld_items},
         ensure_ascii=False, indent=2)
 
+    # BreadcrumbList
+    breadcrumb_ld = json.dumps({"@context":"https://schema.org","@type":"BreadcrumbList",
+        "itemListElement":[
+            {"@type":"ListItem","position":1,"name":SITE_NAME,"item":f"{BASE_URL}/"},
+            {"@type":"ListItem","position":2,"name":f"{label} 口コミランキング","item":page_url},
+        ]}, ensure_ascii=False)
+
+    # FAQ schema
+    top1 = scored[0] if scored else None
+    faq_pairs = []
+    if top1:
+        faq_pairs.append((
+            f"{label}で一番口コミ評価が高い商品は？",
+            f"口コミスコア1位は「{top1['item_name'][:40]}」です。楽天市場で{top1['review_count']:,}件の口コミがあり、平均評点{top1['review_average']:.1f}点を獲得しています。",
+        ))
+    faq_pairs += [
+        (f"{label}のスコアはどうやって計算している？",
+         f"口コミ件数の多さ・評価点の高さ・直近7日間の口コミ増加数（話題性）の3要素を組み合わせた独自スコアです。楽天市場の公式データをもとに毎時更新しています。"),
+        (f"楽天の売れ筋ランキングと{label}の口コミランキングは違うの？",
+         f"異なります。楽天の売れ筋は販売数ベースですが、{SITE_NAME}の{label}ランキングは実際に購入した人の口コミ量・質・最近の話題性から算出しています。話題性はなくても長期間高評価を維持している商品が上位に来ることがあります。"),
+    ]
+    faq_ld = json.dumps({"@context":"https://schema.org","@type":"FAQPage",
+        "mainEntity":[{"@type":"Question","name":q,
+                        "acceptedAnswer":{"@type":"Answer","text":a}}
+                       for q,a in faq_pairs]}, ensure_ascii=False)
+
     # charts
     trends_data        = compute_trends(key, scored)
     hero_svg, color_map, badge_map = render_hero_ts(scored, trends_data)
@@ -1294,7 +1320,12 @@ def build_genre_page(key, items):
 <meta property="og:title" content="{label} 口コミランキング {year}年 | {SITE_NAME}">
 <meta property="og:description" content="{desc}">
 <meta property="og:url" content="{page_url}">
+<meta name="twitter:card" content="summary">
+<meta name="twitter:title" content="{label} 口コミランキング {year}年 | {SITE_NAME}">
+<meta name="twitter:description" content="{desc}">
 <script type="application/ld+json">{jsonld}</script>
+<script type="application/ld+json">{breadcrumb_ld}</script>
+<script type="application/ld+json">{faq_ld}</script>
 <style>{CSS}</style>
 </head>
 <body>
@@ -1500,6 +1531,14 @@ def build_index(genre_counts):
 <meta name="description" content="楽天市場の口コミ件数と評価点から独自スコアを算出し、売れ筋とは異なる本当の評価ランキングを29ジャンルで提供。">
 <meta name="robots" content="index,follow">
 <link rel="canonical" href="{BASE_URL}/">
+<meta property="og:type" content="website">
+<meta property="og:title" content="{SITE_NAME} — 口コミスコアで選ぶ、本当のランキング">
+<meta property="og:description" content="楽天市場の口コミ件数と評価点から独自スコアを算出し、売れ筋とは異なる本当の評価ランキングを29ジャンルで提供。">
+<meta property="og:url" content="{BASE_URL}/">
+<meta name="twitter:card" content="summary">
+<meta name="twitter:title" content="{SITE_NAME} — 口コミスコアで選ぶ、本当のランキング">
+<meta name="twitter:description" content="楽天市場の口コミ件数と評価点から独自スコアを算出し、売れ筋とは異なる本当の評価ランキングを29ジャンルで提供。">
+<script type="application/ld+json">{{"@context":"https://schema.org","@type":"WebSite","name":"{SITE_NAME}","url":"{BASE_URL}/","description":"楽天市場の口コミ件数と評価点から独自スコアを算出し、売れ筋とは異なる本当の評価ランキングを29ジャンルで提供。"}}</script>
 <style>
 {CSS}
 .top-hero{{background:var(--sur);border-bottom:1px solid var(--bdr);
@@ -1546,10 +1585,11 @@ def build_index(genre_counts):
 </html>"""
 
 def build_sitemap(built):
-    urls = [f'  <url><loc>{BASE_URL}/</loc><changefreq>hourly</changefreq><priority>1.0</priority></url>']
+    today = date.today().isoformat()
+    urls = [f'  <url><loc>{BASE_URL}/</loc><lastmod>{today}</lastmod><changefreq>hourly</changefreq><priority>1.0</priority></url>']
     for key in built:
         if key in GENRE_META:
-            urls.append(f'  <url><loc>{BASE_URL}/{GENRE_META[key]["slug"]}/</loc><changefreq>hourly</changefreq><priority>0.8</priority></url>')
+            urls.append(f'  <url><loc>{BASE_URL}/{GENRE_META[key]["slug"]}/</loc><lastmod>{today}</lastmod><changefreq>hourly</changefreq><priority>0.8</priority></url>')
     return f'<?xml version="1.0" encoding="UTF-8"?>\n<urlset xmlns="http://www.sitemaps.org/schemas/sitemap/0.9">\n{chr(10).join(urls)}\n</urlset>'
 
 # ── メイン ──────────────────────────────────────────────────
@@ -1582,6 +1622,9 @@ def main():
         sm = build_sitemap(built)
         (DOCS_DIR / "sitemap.xml").write_text(sm, encoding="utf-8")
         print(f"→ docs/sitemap.xml", file=sys.stderr)
+        robots = f"User-agent: *\nAllow: /\nSitemap: {BASE_URL}/sitemap.xml\n"
+        (DOCS_DIR / "robots.txt").write_text(robots, encoding="utf-8")
+        print(f"→ docs/robots.txt", file=sys.stderr)
 
     print(f"\n✓ Built {len(built)} pages → {DOCS_DIR}", file=sys.stderr)
 
