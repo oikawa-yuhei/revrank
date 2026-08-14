@@ -1,0 +1,3 @@
+User-agent: *
+Allow: /
+Sitemap: https://oikawa-yuhei.github.io/revrank/sitemap.xml
