@@ -793,9 +793,10 @@ button{cursor:pointer;border:none;background:none;font:inherit;color:inherit}
 .tab.active{color:var(--acc);border-bottom-color:var(--acc)}
 
 /* GENRE GUIDE */
-.genre-guide{max-width:800px;margin:16px auto 0;padding:0 0}
-.genre-guide-inner{background:var(--sur2);border:1px solid var(--bdr);border-radius:var(--r);padding:14px 18px;font-size:13px;line-height:1.8;color:var(--ink2)}
-.genre-guide-inner p{margin:0}
+.genre-guide{max-width:800px;margin:16px auto 0}
+.genre-guide-inner{background:var(--sur2);border:1px solid var(--bdr);border-radius:var(--r);padding:14px 18px}
+.guide-label{font-size:10px;font-weight:900;letter-spacing:.1em;color:var(--acc);margin-bottom:8px}
+.guide-body{font-size:13px;line-height:1.8;color:var(--ink2);margin:0}
 
 /* HERO */
 .hero{max-width:800px;margin:0 auto;padding:16px 0 0}
@@ -998,7 +999,7 @@ def build_genre_page(key):
     # ガイドテキスト
     guide_text = m.get('guide', '')
     guide_html = (
-        f'<div class="genre-guide"><div class="genre-guide-inner"><p>{_he(guide_text)}</p></div></div>'
+        f'<div class="genre-guide"><div class="genre-guide-inner"><p class="guide-label">■ 商品選びのポイント</p><p class="guide-body">{_he(guide_text)}</p></div></div>'
         if guide_text else ''
     )
 
