@@ -29,9 +29,10 @@ def main():
     args = parser.parse_args()
 
     load_dotenv()
-    app_id     = os.environ.get("RAKUTEN_ICHIBA_APP_ID")
-    access_key = os.environ.get("RAKUTEN_ICHIBA_ACCESS_KEY")
-    origin     = os.environ.get("RAKUTEN_ORIGIN")
+    app_id       = os.environ.get("RAKUTEN_ICHIBA_APP_ID")
+    access_key   = os.environ.get("RAKUTEN_ICHIBA_ACCESS_KEY")
+    origin       = os.environ.get("RAKUTEN_ORIGIN")
+    affiliate_id = os.environ.get("RAKUTEN_AFFILIATE_ID", "")  # 未設定でも動作する
     if not app_id or not access_key or not origin:
         sys.exit("環境変数 RAKUTEN_ICHIBA_APP_ID / RAKUTEN_ICHIBA_ACCESS_KEY / RAKUTEN_ORIGIN が未設定です。")
 
@@ -52,7 +53,8 @@ def main():
             time.sleep(REQUEST_INTERVAL)
 
         try:
-            items = fetch_ranking(app_id, access_key, origin, genre["id"])
+            items = fetch_ranking(app_id, access_key, origin, genre["id"],
+                                  affiliate_id=affiliate_id)
             save_ranking_items(fetched_date, genre["id"], key, items)
             print(f"[OK] {key} ({genre['label']}) {len(items)}件")
             total_ok += 1

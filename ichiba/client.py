@@ -50,6 +50,7 @@ def _normalize(raw_item):
 
 
 def fetch_ranking(app_id, access_key, origin, genre_id,
+                  affiliate_id=None,
                   pages=PAGES_PER_GENRE, hits=PAGE_SIZE):
     """指定ジャンルの上位ランキングをまとめて取得し、正規化済みのリストを返す。"""
     items = []
@@ -64,6 +65,8 @@ def fetch_ranking(app_id, access_key, origin, genre_id,
             "page":          page,
             "hits":          hits,
         }
+        if affiliate_id:
+            params["affiliateId"] = affiliate_id
         data = _request(RANKING_URL, params, origin)
         for raw in data.get("Items", []):
             items.append(_normalize(raw))
