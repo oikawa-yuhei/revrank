@@ -1327,9 +1327,7 @@ document.querySelectorAll('.ptab').forEach(function(t) {{
 }});
 
 function load(days) {{
-  fetch(WORKER + '/stats?days=' + days, {{
-    headers: {{'X-Admin-Key': adminKey}}
-  }})
+  fetch(WORKER + '/stats?days=' + days + '&key=' + encodeURIComponent(adminKey), {{}})
   .then(function(r) {{
     if (r.status === 401) {{
       document.getElementById('err-msg').textContent = 'キーが違います';
