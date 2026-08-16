@@ -32,6 +32,7 @@ CACHE_DIR.mkdir(parents=True, exist_ok=True)
 _FAVICON_SVG = (
     '<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 32 32">'
     '<rect width="32" height="32" rx="7" fill="#12132a"/>'
+    '<text x="2" y="8" font-family="Arial Black,Arial,sans-serif" font-size="6" font-weight="900" fill="#f5b842" fill-opacity=".8">RR</text>'
     '<rect x="4"  y="15" width="7" height="13" rx="1.5" fill="#9ca3af"/>'  # 2位・銀
     '<rect x="13" y="7"  width="7" height="21" rx="1.5" fill="#f5b842"/>'  # 1位・金
     '<rect x="22" y="19" width="7" height="9"  rx="1.5" fill="#cd7c2c"/>'  # 3位・銅
