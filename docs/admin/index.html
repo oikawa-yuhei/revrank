@@ -1,0 +1,208 @@
+<!DOCTYPE html>
+<html lang="ja">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>RevRank Analytics</title>
+<meta name="robots" content="noindex,nofollow">
+<style>
+:root{
+  --bg:#0a0b15;--sur:#131524;--sur2:#1a1d30;--bdr:#252840;
+  --ink:#e2e5f5;--ink2:#8a8eaa;--ink3:#454968;
+  --acc:#f5b842;--good:#34d399;--warn:#fbbf24;--info:#5b8af8;
+  --r:10px;--sans:-apple-system,BlinkMacSystemFont,'Hiragino Sans',sans-serif;
+}
+*,*::before,*::after{box-sizing:border-box;margin:0;padding:0}
+body{background:var(--bg);color:var(--ink);font-family:var(--sans);font-size:14px;min-height:100vh}
+a{color:inherit;text-decoration:none}
+.wrap{max-width:900px;margin:0 auto;padding:24px 16px}
+.hd{display:flex;align-items:center;justify-content:space-between;margin-bottom:24px;gap:12px;flex-wrap:wrap}
+.logo{font-size:20px;font-weight:900;color:var(--acc)}
+.logo span{color:var(--ink2);font-weight:400;font-size:13px}
+.period-tabs{display:flex;gap:6px}
+.ptab{padding:5px 14px;border-radius:99px;border:1px solid var(--bdr);color:var(--ink2);font-size:12px;font-weight:600;cursor:pointer;background:var(--sur)}
+.ptab.active{border-color:var(--acc);color:var(--acc);background:color-mix(in srgb,var(--acc) 10%,transparent)}
+.kpi-row{display:grid;grid-template-columns:repeat(auto-fill,minmax(140px,1fr));gap:10px;margin-bottom:20px}
+.kpi{background:var(--sur);border:1px solid var(--bdr);border-radius:var(--r);padding:14px 16px}
+.kpi-lbl{font-size:11px;color:var(--ink2);font-weight:600;letter-spacing:.06em;text-transform:uppercase;margin-bottom:4px}
+.kpi-val{font-size:28px;font-weight:900;color:var(--acc);font-variant-numeric:tabular-nums}
+.card{background:var(--sur);border:1px solid var(--bdr);border-radius:var(--r);overflow:hidden;margin-bottom:14px}
+.card-hd{padding:12px 16px;border-bottom:1px solid var(--bdr);font-size:12px;font-weight:700;color:var(--ink2);letter-spacing:.06em;text-transform:uppercase}
+.chart-wrap{padding:16px;overflow-x:auto}
+svg.chart{width:100%;display:block}
+.page-table{width:100%;border-collapse:collapse}
+.page-table th{padding:8px 12px;text-align:left;font-size:11px;font-weight:700;color:var(--ink3);letter-spacing:.06em;text-transform:uppercase;border-bottom:1px solid var(--bdr)}
+.page-table td{padding:8px 12px;border-bottom:1px solid var(--bdr);font-size:13px}
+.page-table tr:last-child td{border-bottom:none}
+.page-table tr:hover td{background:var(--sur2)}
+.bar-wrap{display:flex;align-items:center;gap:8px}
+.bar{height:6px;background:var(--acc);border-radius:3px;opacity:.7;flex-shrink:0}
+.cnt{color:var(--ink2);font-size:12px;font-variant-numeric:tabular-nums;white-space:nowrap}
+.recent-list{padding:0}
+.rl-item{display:flex;align-items:baseline;gap:10px;padding:7px 16px;border-bottom:1px solid var(--bdr);font-size:12px}
+.rl-item:last-child{border-bottom:none}
+.rl-page{color:var(--ink);font-weight:600;flex:1;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.rl-ref{color:var(--ink3);font-size:11px;flex:1;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.rl-time{color:var(--ink3);font-size:11px;white-space:nowrap}
+.login{display:flex;flex-direction:column;align-items:center;justify-content:center;min-height:60vh;gap:16px}
+.login-box{background:var(--sur);border:1px solid var(--bdr);border-radius:var(--r);padding:32px;width:100%;max-width:320px;display:flex;flex-direction:column;gap:12px}
+.login-title{font-size:16px;font-weight:800;color:var(--acc);text-align:center}
+input[type=text],input[type=password]{background:var(--sur2);border:1px solid var(--bdr);border-radius:6px;padding:9px 12px;color:var(--ink);font-size:14px;width:100%;outline:none}
+input:focus{border-color:var(--acc)}
+.btn-login{background:var(--acc);color:#000;font-weight:800;font-size:14px;border:none;border-radius:6px;padding:10px;cursor:pointer;width:100%}
+.err{color:var(--warn);font-size:12px;text-align:center}
+#main{display:none}
+</style>
+</head>
+<body>
+<div class="wrap">
+  <div id="login-view" class="login">
+    <div class="login-box">
+      <div class="login-title">RevRank Analytics</div>
+      <input type="password" id="key-input" placeholder="管理キー" autocomplete="current-password">
+      <button class="btn-login" onclick="doLogin()">ログイン</button>
+      <div class="err" id="err-msg"></div>
+    </div>
+  </div>
+
+  <div id="main">
+    <div class="hd">
+      <div class="logo">RevRank <span>Analytics</span></div>
+      <div class="period-tabs">
+        <div class="ptab active" data-d="7">7日</div>
+        <div class="ptab" data-d="30">30日</div>
+        <div class="ptab" data-d="90">90日</div>
+      </div>
+    </div>
+    <div class="kpi-row" id="kpi-row"></div>
+    <div class="card">
+      <div class="card-hd">日別PV</div>
+      <div class="chart-wrap" id="day-chart"></div>
+    </div>
+    <div class="card">
+      <div class="card-hd">ページ別PV</div>
+      <table class="page-table" id="page-table">
+        <thead><tr><th>ページ</th><th>PV</th><th></th></tr></thead>
+        <tbody></tbody>
+      </table>
+    </div>
+    <div class="card">
+      <div class="card-hd">直近アクセス</div>
+      <ul class="recent-list" id="recent-list"></ul>
+    </div>
+  </div>
+</div>
+
+<script>
+var WORKER = '';
+var adminKey = '';
+
+function doLogin() {
+  var k = document.getElementById('key-input').value.trim();
+  if (!k) return;
+  adminKey = k;
+  load(30);
+}
+
+document.getElementById('key-input').addEventListener('keydown', function(e) {
+  if (e.key === 'Enter') doLogin();
+});
+
+// URL パラメータからキーを自動読み込み
+(function() {
+  var p = new URLSearchParams(location.search).get('key');
+  if (p) { adminKey = p; load(30); }
+})();
+
+document.querySelectorAll('.ptab').forEach(function(t) {
+  t.addEventListener('click', function() {
+    document.querySelectorAll('.ptab').forEach(function(x) { x.classList.remove('active'); });
+    t.classList.add('active');
+    load(parseInt(t.dataset.d));
+  });
+});
+
+function load(days) {
+  fetch(WORKER + '/stats?days=' + days, {
+    headers: {'X-Admin-Key': adminKey}
+  })
+  .then(function(r) {
+    if (r.status === 401) {
+      document.getElementById('err-msg').textContent = 'キーが違います';
+      return null;
+    }
+    return r.json();
+  })
+  .then(function(d) {
+    if (!d) return;
+    // 自己除外フラグをセット
+    localStorage.setItem('rrAdmin', '1');
+    document.getElementById('login-view').style.display = 'none';
+    document.getElementById('main').style.display = 'block';
+    renderKpi(d, days);
+    renderChart(d.by_day);
+    renderPages(d.by_page);
+    renderRecent(d.recent);
+  })
+  .catch(function(e) {
+    document.getElementById('err-msg').textContent = 'エラー: ' + e.message;
+  });
+}
+
+function renderKpi(d, days) {
+  var byDay = d.by_day || [];
+  var today = byDay.length ? byDay[byDay.length-1].count : 0;
+  var pages = new Set((d.by_page||[]).map(function(p){return p.page;})).size;
+  document.getElementById('kpi-row').innerHTML =
+    kpiCard('総PV', d.total, '過去' + days + '日') +
+    kpiCard('本日PV', today, '今日') +
+    kpiCard('ページ数', pages, 'アクセスあり');
+}
+function kpiCard(lbl, val, sub) {
+  return '<div class="kpi"><div class="kpi-lbl">'+lbl+'</div><div class="kpi-val">'+(val||0).toLocaleString()+'</div><div style="font-size:11px;color:var(--ink3);margin-top:2px">'+sub+'</div></div>';
+}
+
+function renderChart(byDay) {
+  if (!byDay || !byDay.length) { document.getElementById('day-chart').innerHTML='<p style="color:var(--ink3);padding:16px;font-size:12px">データなし</p>'; return; }
+  var W=800, H=120, PL=36, PR=W-8, PT=8, PB=H-20, PW=PR-PL, PH=PB-PT;
+  var counts = byDay.map(function(r){return r.count;});
+  var mx = Math.max.apply(null, counts) || 1;
+  function x(i){ return PL + i/(byDay.length-1||1)*PW; }
+  function y(v){ return PB - v/mx*PH; }
+  var pts = byDay.map(function(r,i){return x(i).toFixed(1)+','+y(r.count).toFixed(1);}).join(' ');
+  var area = x(0).toFixed(1)+','+PB+' '+pts+' '+x(byDay.length-1).toFixed(1)+','+PB;
+  var ticks = '';
+  [0, Math.round(byDay.length/2), byDay.length-1].forEach(function(i){
+    if(byDay[i]) ticks += '<text x="'+x(i).toFixed(1)+'" y="'+(PB+14)+'" text-anchor="middle" font-size="9" fill="var(--ink3)">'+byDay[i].date.slice(5)+'</text>';
+  });
+  document.getElementById('day-chart').innerHTML =
+    '<svg class="chart" viewBox="0 0 '+W+' '+H+'">' +
+    '<polygon points="'+area+'" fill="var(--acc)" fill-opacity=".12"/>' +
+    '<polyline points="'+pts+'" fill="none" stroke="var(--acc)" stroke-width="2" stroke-linejoin="round"/>' +
+    ticks + '</svg>';
+}
+
+function renderPages(byPage) {
+  if (!byPage || !byPage.length) return;
+  var mx = byPage[0].count;
+  var rows = byPage.map(function(p, i) {
+    var pct = Math.round(p.count/mx*100);
+    var label = p.page.replace(/\/$/,'').split('/').pop() || 'トップ';
+    return '<tr><td>'+label+'<div style="font-size:10px;color:var(--ink3)">'+p.page+'</div></td>' +
+      '<td style="font-variant-numeric:tabular-nums">'+p.count.toLocaleString()+'</td>' +
+      '<td style="width:120px"><div class="bar-wrap"><div class="bar" style="width:'+pct+'px"></div></div></td></tr>';
+  }).join('');
+  document.querySelector('#page-table tbody').innerHTML = rows;
+}
+
+function renderRecent(recent) {
+  if (!recent || !recent.length) return;
+  document.getElementById('recent-list').innerHTML = recent.map(function(r) {
+    var t = r.viewed_at ? r.viewed_at.replace('T',' ').slice(0,16) : '';
+    var ref = r.referrer ? r.referrer.replace(/^https?:\/\/[^\/]+/,'') || r.referrer : '直接';
+    return '<li class="rl-item"><span class="rl-page">'+r.page+'</span><span class="rl-ref">from: '+ref+'</span><span class="rl-time">'+t+'</span></li>';
+  }).join('');
+}
+</script>
+</body>
+</html>

@@ -1,0 +1,11 @@
+name = "revrank-analytics"
+main = "src/index.js"
+compatibility_date = "2024-09-23"
+
+[[d1_databases]]
+binding = "DB"
+database_name = "revrank-analytics"
+database_id = "0e79ae6d-53c0-4c3b-8b56-ce9308c507f0"
+
+[vars]
+ALLOWED_ORIGIN = "https://oikawa-yuhei.github.io"
