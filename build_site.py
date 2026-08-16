@@ -28,6 +28,17 @@ WORKER_URL   = os.environ.get("ANALYTICS_WORKER_URL", "")  # Cloudflare Worker U
 DOCS_DIR.mkdir(parents=True, exist_ok=True)
 CACHE_DIR.mkdir(parents=True, exist_ok=True)
 
+# ── ファビコン (ポディウム型 SVG) ────────────────────────────────
+_FAVICON_SVG = (
+    '<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 32 32">'
+    '<rect width="32" height="32" rx="7" fill="#12132a"/>'
+    '<rect x="4"  y="15" width="7" height="13" rx="1.5" fill="#9ca3af"/>'  # 2位・銀
+    '<rect x="13" y="7"  width="7" height="21" rx="1.5" fill="#f5b842"/>'  # 1位・金
+    '<rect x="22" y="19" width="7" height="9"  rx="1.5" fill="#cd7c2c"/>'  # 3位・銅
+    '</svg>'
+)
+_FAVICON = f'data:image/svg+xml;base64,{base64.b64encode(_FAVICON_SVG.encode()).decode()}'
+
 # 製品カラーパレット (上位5製品)
 PCOLS = ["#d4922a", "#3b6fe0", "#059669", "#9333ea", "#9ca3af"]
 
@@ -1061,6 +1072,7 @@ def build_genre_page(key):
 <meta name="description" content="{m['desc']}">
 <meta name="robots" content="index,follow">
 <link rel="canonical" href="{page_url}">
+<link rel="icon" type="image/svg+xml" href="{_FAVICON}">
 <meta property="og:title" content="{label}ランキング {year}年 | RevRank">
 <meta property="og:description" content="{m['desc']}">
 <meta property="og:url" content="{page_url}">
@@ -1213,6 +1225,7 @@ def build_index(genre_counts):
 <meta name="description" content="楽天市場の製品を口コミランク・コスパランク・バズランクの3指標で独自分析。売れ筋とは違う本当の評価ランキングを31ジャンルで提供。">
 <meta name="robots" content="index,follow">
 <link rel="canonical" href="{BASE_URL}/">
+<link rel="icon" type="image/svg+xml" href="{_FAVICON}">
 <style>{CSS}</style>
 </head>
 <body>
@@ -1254,6 +1267,7 @@ def build_admin():
 <meta name="viewport" content="width=device-width,initial-scale=1">
 <title>RevRank Analytics</title>
 <meta name="robots" content="noindex,nofollow">
+<link rel="icon" type="image/svg+xml" href="{_FAVICON}">
 <style>
 :root{{
   --bg:#0a0b15;--sur:#131524;--sur2:#1a1d30;--bdr:#252840;
