@@ -43,7 +43,8 @@ jobs:
       - name: Build site
         run: python build_site.py
         env:
-          RAKUTEN_ICHIBA_APP_ID: ${{ secrets.RAKUTEN_ICHIBA_APP_ID }}
+          RAKUTEN_ICHIBA_APP_ID:      ${{ secrets.RAKUTEN_ICHIBA_APP_ID }}
+          ANALYTICS_WORKER_URL:       ${{ secrets.ANALYTICS_WORKER_URL }}
 
       - name: Commit & push (リトライ付き)
         run: |
