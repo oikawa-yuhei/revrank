@@ -211,7 +211,7 @@ button{cursor:pointer;border:none;background:none;font:inherit;color:inherit}
   </div>
 </div>
 
-<div class="genre-guide"><div class="genre-guide-inner"><p>走行性・折りたたみの手軽さ・収納バスケットの使いやすさが毎日の使用感を決める。実際に乗せる子どもの月齢・体重とのフィット感も重要。「段差に弱かった」「改札を通りにくい」「雨カバーが別売りだった」という街中での使用体験は実際のパパ・ママの口コミにしか出てこない。RevRankは日常的にベビーカーを使う保護者の本音の評価を集計し、カタログスペックでは見えない使いやすさを数値で示す。</p></div></div>
+<div class="genre-guide"><div class="genre-guide-inner"><p>走行性・折りたたみの手軽さ・収納バスケットの使いやすさが毎日の使用感を決める。段差や改札、エレベーターなど都市での実用性は実際に使ってみないとわからない。RevRankは評価点と件数をベイズ補正したスコアで並べるため、カタログスペックではなく、多くの保護者から継続的に高評価を受けた製品が上位に浮かび上がる。</p></div></div>
 <div class="hero"><div class="hero-inner">
   <div class="hero-head">
     <div class="hero-title">ランク推移チャート — 上位5商品</div>
@@ -975,7 +975,7 @@ button{cursor:pointer;border:none;background:none;font:inherit;color:inherit}
 <script>
 (function(){
   if(localStorage.getItem('rrAdmin')) return;
-  var w='';
+  var w='https://revrank-analytics.revrank-api.workers.dev';
   if(!w) return;
   try{ fetch(w+'/track',{method:'POST',headers:{'Content-Type':'application/json'},
     body:JSON.stringify({p:location.pathname,r:document.referrer}),keepalive:true}).catch(function(){}); }catch(e){}

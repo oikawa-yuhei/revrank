@@ -211,7 +211,7 @@ button{cursor:pointer;border:none;background:none;font:inherit;color:inherit}
   </div>
 </div>
 
-<div class="genre-guide"><div class="genre-guide-inner"><p>可変式か固定式かで用途が変わる。可変式は省スペースで複数の重量に対応できる反面、重量変更の操作性がトレーニングのテンポに影響する。グリップのローレット加工・プレートのズレにくさ・重量精度がホームジム派が実際に気にするポイント。「プレートがズレて危なかった」「チャックが壊れた」といった問題は口コミにしか出てこない情報だ。RevRankはそこを評価する。</p></div></div>
+<div class="genre-guide"><div class="genre-guide-inner"><p>可変式か固定式かで用途が変わる。可変式は省スペースで複数の重量に対応できる反面、重量変更の操作性がトレーニングのテンポに影響する。グリップのローレット加工・プレートのズレにくさ・重量精度がホームジム派の関心ポイント。RevRankは評価点と件数をベイズ補正したスコアで並べるため、一時的な話題性ではなく多くの購入者から安定して高評価を受けた製品が上位に来る。</p></div></div>
 <div class="hero"><div class="hero-inner">
   <div class="hero-head">
     <div class="hero-title">ランク推移チャート — 上位5商品</div>
@@ -975,7 +975,7 @@ button{cursor:pointer;border:none;background:none;font:inherit;color:inherit}
 <script>
 (function(){
   if(localStorage.getItem('rrAdmin')) return;
-  var w='';
+  var w='https://revrank-analytics.revrank-api.workers.dev';
   if(!w) return;
   try{ fetch(w+'/track',{method:'POST',headers:{'Content-Type':'application/json'},
     body:JSON.stringify({p:location.pathname,r:document.referrer}),keepalive:true}).catch(function(){}); }catch(e){}

@@ -211,7 +211,7 @@ button{cursor:pointer;border:none;background:none;font:inherit;color:inherit}
   </div>
 </div>
 
-<div class="genre-guide"><div class="genre-guide-inner"><p>クラブ選びで最も個人差が出るのがシャフトの硬さ（フレックス）と重量。スイングスピードに合わないシャフトは飛距離ロスに直結する。楽天の売れ筋は入門者向けセットが上位に入りやすいが、ゴルファーの口コミは「打感」「弾道の安定性」「実際の飛距離」を具体的に語る。スペック表では見えない〝手に伝わる感覚〟の評価こそが、RevRankで長く高得点を維持する商品の証明だ。</p></div></div>
+<div class="genre-guide"><div class="genre-guide-inner"><p>クラブ選びで最も個人差が出るのがシャフトの硬さ（フレックス）と重量。スイングスピードに合わないシャフトは飛距離ロスに直結する。楽天の売れ筋は入門者向けセットが上位に入りやすいが、RevRankは評価点と件数をベイズ補正したスコアで順位を決める。試打できないネット購入だからこそ、多くのゴルファーから継続的に高評価を得ているかどうかが、信頼できる選択軸になる。</p></div></div>
 <div class="hero"><div class="hero-inner">
   <div class="hero-head">
     <div class="hero-title">ランク推移チャート — 上位5商品</div>
@@ -975,7 +975,7 @@ button{cursor:pointer;border:none;background:none;font:inherit;color:inherit}
 <script>
 (function(){
   if(localStorage.getItem('rrAdmin')) return;
-  var w='';
+  var w='https://revrank-analytics.revrank-api.workers.dev';
   if(!w) return;
   try{ fetch(w+'/track',{method:'POST',headers:{'Content-Type':'application/json'},
     body:JSON.stringify({p:location.pathname,r:document.referrer}),keepalive:true}).catch(function(){}); }catch(e){}

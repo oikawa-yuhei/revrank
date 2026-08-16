@@ -211,7 +211,7 @@ button{cursor:pointer;border:none;background:none;font:inherit;color:inherit}
   </div>
 </div>
 
-<div class="genre-guide"><div class="genre-guide-inner"><p>ダウントゥ（つま先の下がり）・ラバーのスティッキー性・ヒールカップのフィット感が選択の三軸。スラブ系と垂壁・オーバーハング系でも最適なシューズが変わる。「サイズ感が独特でハーフサイズ小さめが正解だった」「ヒールフックがしっかり決まる」という実際にクライミングジムや外岩で使ったクライマーの口コミがRevRankに蓄積され、感覚的な部分も含めた本当の評価がわかる。</p></div></div>
+<div class="genre-guide"><div class="genre-guide-inner"><p>ダウントゥ（つま先の下がり）・ラバーのスティッキー性・ヒールカップのフィット感が選択の三軸。スラブ系と垂壁・オーバーハング系でも最適なシューズは変わる。試し履きなしのネット購入が多いジャンルだが、RevRankは評価点と件数のベイズ補正スコアで並べるため、多くのクライマーから安定して高評価を受けたモデルを起点に選択を絞り込める。</p></div></div>
 <div class="hero"><div class="hero-inner">
   <div class="hero-head">
     <div class="hero-title">ランク推移チャート — 上位5商品</div>
@@ -975,7 +975,7 @@ button{cursor:pointer;border:none;background:none;font:inherit;color:inherit}
 <script>
 (function(){
   if(localStorage.getItem('rrAdmin')) return;
-  var w='';
+  var w='https://revrank-analytics.revrank-api.workers.dev';
   if(!w) return;
   try{ fetch(w+'/track',{method:'POST',headers:{'Content-Type':'application/json'},
     body:JSON.stringify({p:location.pathname,r:document.referrer}),keepalive:true}).catch(function(){}); }catch(e){}

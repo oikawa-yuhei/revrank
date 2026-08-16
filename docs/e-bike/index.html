@@ -211,7 +211,7 @@ button{cursor:pointer;border:none;background:none;font:inherit;color:inherit}
   </div>
 </div>
 
-<div class="genre-guide"><div class="genre-guide-inner"><p>アシスト力・バッテリー航続距離・車体重量が電動アシスト自転車の三大選択基準。坂道の多い地域・通勤距離・駐輪スペースによって最適なモデルは変わる。「カタログ上の航続距離より実際は短い」「坂道で急にアシストが切れた」という実使用者の声はスペック表には載らない。RevRankは毎日乗り続けた購入者の長期レビューを統計評価し、用途に合った本当の一台を選ぶデータを提供する。</p></div></div>
+<div class="genre-guide"><div class="genre-guide-inner"><p>アシスト力・バッテリー航続距離・車体重量が三大選択基準。坂道の多い地域・通勤距離・駐輪スペースによって最適なモデルは変わる。RevRankは評価点と件数のベイズ補正スコアで並べる。カタログスペックと実際の使用感にギャップがある場合は評価点に反映されやすいため、多くの購入者から安定して高評価を受けた製品が上位に残る。</p></div></div>
 <div class="hero"><div class="hero-inner">
   <div class="hero-head">
     <div class="hero-title">ランク推移チャート — 上位5商品</div>
@@ -975,7 +975,7 @@ button{cursor:pointer;border:none;background:none;font:inherit;color:inherit}
 <script>
 (function(){
   if(localStorage.getItem('rrAdmin')) return;
-  var w='';
+  var w='https://revrank-analytics.revrank-api.workers.dev';
   if(!w) return;
   try{ fetch(w+'/track',{method:'POST',headers:{'Content-Type':'application/json'},
     body:JSON.stringify({p:location.pathname,r:document.referrer}),keepalive:true}).catch(function(){}); }catch(e){}

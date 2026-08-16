@@ -211,7 +211,7 @@ button{cursor:pointer;border:none;background:none;font:inherit;color:inherit}
   </div>
 </div>
 
-<div class="genre-guide"><div class="genre-guide-inner"><p>座り心地・収納サイズ・重量の三点が選択の核心。チェアはキャンプスタイルを大きく左右するギアだが、実際の使いやすさは「展開・収納のしやすさ」「長時間座った後の体への影響」にかかっている。安価なチェアはフレームの溶接部が早期に破損するケースも多い。「3年使ってもガタつかない」という長期レビューが多い製品こそRevRankが高得点を出す理由だ。</p></div></div>
+<div class="genre-guide"><div class="genre-guide-inner"><p>座り心地・収納サイズ・重量の三点が選択の核心。展開・収納のしやすさや長時間座った後の快適性は使ってみないとわからない。RevRankは評価点と件数をベイズ補正したスコアで並べるため、デザインや話題性ではなく、多くのキャンパーから継続的に高評価を受けた製品が上位に定着する。</p></div></div>
 <div class="hero"><div class="hero-inner">
   <div class="hero-head">
     <div class="hero-title">ランク推移チャート — 上位5商品</div>
@@ -975,7 +975,7 @@ button{cursor:pointer;border:none;background:none;font:inherit;color:inherit}
 <script>
 (function(){
   if(localStorage.getItem('rrAdmin')) return;
-  var w='';
+  var w='https://revrank-analytics.revrank-api.workers.dev';
   if(!w) return;
   try{ fetch(w+'/track',{method:'POST',headers:{'Content-Type':'application/json'},
     body:JSON.stringify({p:location.pathname,r:document.referrer}),keepalive:true}).catch(function(){}); }catch(e){}

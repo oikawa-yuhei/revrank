@@ -211,7 +211,7 @@ button{cursor:pointer;border:none;background:none;font:inherit;color:inherit}
   </div>
 </div>
 
-<div class="genre-guide"><div class="genre-guide-inner"><p>安全性能（R129/R44適合）・取り付けのしやすさ・子どもの乗り心地の三点が最重要。ISOFIXと通常ベルト固定の違い、回転式かどうかも選択基準になる。命を守る道具だからこそ「取り付けが確実にできるか」「子どもが嫌がらないか」という実使用者の評価が最も信頼できる情報源だ。RevRankは安全性と使いやすさを両立した製品に多くの口コミが集まる構造を活かし、本当に信頼できるシートを上位に出す。</p></div></div>
+<div class="genre-guide"><div class="genre-guide-inner"><p>安全性能（R129/R44適合）・取り付けのしやすさ・子どもの乗り心地の三点が最重要。ISOFIXと通常ベルト固定の違い、回転式かどうかも選択基準になる。RevRankは評価点と件数のベイズ補正スコアで並べる。命に関わる道具だからこそ、多くの保護者から安定して高評価を受けている製品を数字的な根拠をもって選べることに価値がある。</p></div></div>
 <div class="hero"><div class="hero-inner">
   <div class="hero-head">
     <div class="hero-title">ランク推移チャート — 上位5商品</div>
@@ -975,7 +975,7 @@ button{cursor:pointer;border:none;background:none;font:inherit;color:inherit}
 <script>
 (function(){
   if(localStorage.getItem('rrAdmin')) return;
-  var w='';
+  var w='https://revrank-analytics.revrank-api.workers.dev';
   if(!w) return;
   try{ fetch(w+'/track',{method:'POST',headers:{'Content-Type':'application/json'},
     body:JSON.stringify({p:location.pathname,r:document.referrer}),keepalive:true}).catch(function(){}); }catch(e){}

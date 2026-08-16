@@ -211,7 +211,7 @@ button{cursor:pointer;border:none;background:none;font:inherit;color:inherit}
   </div>
 </div>
 
-<div class="genre-guide"><div class="genre-guide-inner"><p>快適温度域とカタログ記載の使用可能温度域は異なる。メーカー表記の限界温度より10℃高い環境での使用が現実的な目安。ダウンか化繊か、エア・フォーム・インフレータブルかで用途が変わる。「表記の使用可能温度域では寒かった」という口コミはカタログでは知れない重要情報。RevRankはそうした実使用者の厳しい評価を集計し、スペックと実力が一致した製品を上位に出す。</p></div></div>
+<div class="genre-guide"><div class="genre-guide-inner"><p>快適温度域とカタログ記載の使用可能温度域は異なる。メーカー表記の限界温度より10℃高い環境での使用が現実的な目安。ダウンか化繊か、エア・フォーム・インフレータブルかで用途が変わる。RevRankは評価点と件数をベイズ補正したスコアで順位付けするため、スペックと実際の使用感にギャップのある製品は評価点に反映されやすく、多くの購入者から安定して評価された製品が上位に来る。</p></div></div>
 <div class="hero"><div class="hero-inner">
   <div class="hero-head">
     <div class="hero-title">ランク推移チャート — 上位5商品</div>
@@ -975,7 +975,7 @@ button{cursor:pointer;border:none;background:none;font:inherit;color:inherit}
 <script>
 (function(){
   if(localStorage.getItem('rrAdmin')) return;
-  var w='';
+  var w='https://revrank-analytics.revrank-api.workers.dev';
   if(!w) return;
   try{ fetch(w+'/track',{method:'POST',headers:{'Content-Type':'application/json'},
     body:JSON.stringify({p:location.pathname,r:document.referrer}),keepalive:true}).catch(function(){}); }catch(e){}

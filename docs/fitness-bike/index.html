@@ -211,7 +211,7 @@ button{cursor:pointer;border:none;background:none;font:inherit;color:inherit}
   </div>
 </div>
 
-<div class="genre-guide"><div class="genre-guide-inner"><p>負荷調整のなめらかさ・シート高の調整範囲・ペダルの回転の滑らかさが選択の核心。テレワーク中のながら運動として使うなら静音性が最優先。購入直後は満足しても3ヶ月後にガタつきや異音が出る製品も少なくない。RevRankの口コミ評価は長期使用者のレビューが自然に加重されるため、「半年後も快調」という声が多い製品が上位に浮かび上がる。</p></div></div>
+<div class="genre-guide"><div class="genre-guide-inner"><p>負荷調整のなめらかさ・シート高の調整範囲・ペダルの回転の滑らかさが選択の核心。テレワーク中のながら運動として使うなら静音性が最優先。RevRankは評価点と件数のベイズ補正スコアで並べる。購入直後の高評価より、一定期間使い続けた購入者が多いほどスコアの信頼性が上がるため、件数が積み上がった製品ほど実態を反映した順位になる。</p></div></div>
 <div class="hero"><div class="hero-inner">
   <div class="hero-head">
     <div class="hero-title">ランク推移チャート — 上位5商品</div>
@@ -975,7 +975,7 @@ button{cursor:pointer;border:none;background:none;font:inherit;color:inherit}
 <script>
 (function(){
   if(localStorage.getItem('rrAdmin')) return;
-  var w='';
+  var w='https://revrank-analytics.revrank-api.workers.dev';
   if(!w) return;
   try{ fetch(w+'/track',{method:'POST',headers:{'Content-Type':'application/json'},
     body:JSON.stringify({p:location.pathname,r:document.referrer}),keepalive:true}).catch(function(){}); }catch(e){}

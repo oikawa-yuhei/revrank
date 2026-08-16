@@ -211,7 +211,7 @@ button{cursor:pointer;border:none;background:none;font:inherit;color:inherit}
   </div>
 </div>
 
-<div class="genre-guide"><div class="genre-guide-inner"><p>毎日踏み続けるからこそ「安定性」と「耐久性」が命。安価なモデルは数ヶ月でガタつきが出ることも多く、踏み台の素材・フレームの強度が長期的な満足度を決める。負荷調整の有無と幅も重要な選択基準。「1年以上使い続けている」「音が気にならない」という口コミの蓄積がRevRankの上位を決める根拠であり、単なる売れ筋との違いはそこにある。</p></div></div>
+<div class="genre-guide"><div class="genre-guide-inner"><p>毎日踏み続けるからこそ「安定性」と「耐久性」が命。安価なモデルは数ヶ月でガタつきが出ることも多い。RevRankは楽天購入者の評価点と件数をベイズ補正したスコアで順位を決める。レビュー件数が少ない商品はスコアがジャンル平均に引き寄せられる仕組みのため、多くの購入者から継続して高評価を受けた製品だけが上位に定着する。</p></div></div>
 <div class="hero"><div class="hero-inner">
   <div class="hero-head">
     <div class="hero-title">ランク推移チャート — 上位5商品</div>
@@ -975,7 +975,7 @@ button{cursor:pointer;border:none;background:none;font:inherit;color:inherit}
 <script>
 (function(){
   if(localStorage.getItem('rrAdmin')) return;
-  var w='';
+  var w='https://revrank-analytics.revrank-api.workers.dev';
   if(!w) return;
   try{ fetch(w+'/track',{method:'POST',headers:{'Content-Type':'application/json'},
     body:JSON.stringify({p:location.pathname,r:document.referrer}),keepalive:true}).catch(function(){}); }catch(e){}

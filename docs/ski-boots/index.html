@@ -211,7 +211,7 @@ button{cursor:pointer;border:none;background:none;font:inherit;color:inherit}
   </div>
 </div>
 
-<div class="genre-guide"><div class="genre-guide-inner"><p>フィット感・保温性・バックルの調整幅がブーツ選びの肝。同じ26cmでもラスト（足型）の幅がメーカーによって大きく異なる。試し履きなしのネット購入はリスクを伴うが、「同じ足幅の人に合った」「レンタルより全然快適」という口コミはサイズ選びのヒントになる。「半日滑ったら足が痛くなった」という率直なレビューも含め、RevRankは購入者の本音を統計的に反映した評価でブーツ選びをサポートする。</p></div></div>
+<div class="genre-guide"><div class="genre-guide-inner"><p>フィット感・保温性・バックルの調整幅がブーツ選びの肝。同じサイズでもラスト（足型）の幅はメーカーによって大きく異なる。試し履きなしのネット購入は難易度が高いが、RevRankは評価点と件数のベイズ補正スコアで並べるため、多くの購入者から安定して高評価を受けたモデルを起点に選択肢を絞り込める。</p></div></div>
 <div class="hero"><div class="hero-inner">
   <div class="hero-head">
     <div class="hero-title">ランク推移チャート — 上位5商品</div>
@@ -399,7 +399,7 @@ button{cursor:pointer;border:none;background:none;font:inherit;color:inherit}
 <script>
 (function(){
   if(localStorage.getItem('rrAdmin')) return;
-  var w='';
+  var w='https://revrank-analytics.revrank-api.workers.dev';
   if(!w) return;
   try{ fetch(w+'/track',{method:'POST',headers:{'Content-Type':'application/json'},
     body:JSON.stringify({p:location.pathname,r:document.referrer}),keepalive:true}).catch(function(){}); }catch(e){}

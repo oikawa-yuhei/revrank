@@ -211,7 +211,7 @@ button{cursor:pointer;border:none;background:none;font:inherit;color:inherit}
   </div>
 </div>
 
-<div class="genre-guide"><div class="genre-guide-inner"><p>収納力・重量・耐久性の三点が購入後の満足度を決める。スタンド型かカートバッグかで用途が分かれるが、どちらも「実際にコースで使い続けた」ユーザーの長期評価が品質の信頼度を証明する。デザインは初見で判断できても、チャックの耐久性やポケットの使いやすさは使い込まないとわからない。RevRankは数十件以上の口コミが積み上がった製品を正当に評価する。</p></div></div>
+<div class="genre-guide"><div class="genre-guide-inner"><p>収納力・重量・耐久性の三点が購入後の満足度を決める。スタンド型かカートバッグかで用途が分かれる。チャックの耐久性やポケットの使いやすさは使い込まないとわからない要素だが、RevRankは評価点と件数を統計補正したスコアで並べるため、多くの購入者から安定して高評価を得た製品が自然と上位に浮かび上がる。</p></div></div>
 <div class="hero"><div class="hero-inner">
   <div class="hero-head">
     <div class="hero-title">ランク推移チャート — 上位5商品</div>
@@ -975,7 +975,7 @@ button{cursor:pointer;border:none;background:none;font:inherit;color:inherit}
 <script>
 (function(){
   if(localStorage.getItem('rrAdmin')) return;
-  var w='';
+  var w='https://revrank-analytics.revrank-api.workers.dev';
   if(!w) return;
   try{ fetch(w+'/track',{method:'POST',headers:{'Content-Type':'application/json'},
     body:JSON.stringify({p:location.pathname,r:document.referrer}),keepalive:true}).catch(function(){}); }catch(e){}

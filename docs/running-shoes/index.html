@@ -211,7 +211,7 @@ button{cursor:pointer;border:none;background:none;font:inherit;color:inherit}
   </div>
 </div>
 
-<div class="genre-guide"><div class="genre-guide-inner"><p>選ぶ視点は「足幅」「ドロップ高」「クッション素材」の3点。同じサイズでもメーカーによって足幅の設計が大きく異なり、フィット感が長距離の快適性を左右する。楽天の売れ筋はキャンペーン商品やセール品が上位に入りやすいが、RevRankの口コミ評価は月100km以上走るユーザーの本音の声を件数と評価点で統計補正したスコア。「買って1年、まだ現役」という長期レビューが多い商品が自然と上位に浮かび上がる。</p></div></div>
+<div class="genre-guide"><div class="genre-guide-inner"><p>選ぶ視点は「足幅」「ドロップ高」「クッション素材」の3点。同じサイズでもメーカーによって足幅の設計は大きく異なる。楽天の売れ筋はセール品やキャンペーン商品が上位に入りやすいが、RevRankは評価点と件数をベイズ統計で補正したスコアで並べ直す。レビューが少ない商品はスコアがジャンル平均に引き寄せられる設計なので、少数の高評価より多くの購入者から安定して評価された一足が上位に残る。</p></div></div>
 <div class="hero"><div class="hero-inner">
   <div class="hero-head">
     <div class="hero-title">ランク推移チャート — 上位5商品</div>
@@ -975,7 +975,7 @@ button{cursor:pointer;border:none;background:none;font:inherit;color:inherit}
 <script>
 (function(){
   if(localStorage.getItem('rrAdmin')) return;
-  var w='';
+  var w='https://revrank-analytics.revrank-api.workers.dev';
   if(!w) return;
   try{ fetch(w+'/track',{method:'POST',headers:{'Content-Type':'application/json'},
     body:JSON.stringify({p:location.pathname,r:document.referrer}),keepalive:true}).catch(function(){}); }catch(e){}

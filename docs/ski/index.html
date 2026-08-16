@@ -211,7 +211,7 @@ button{cursor:pointer;border:none;background:none;font:inherit;color:inherit}
   </div>
 </div>
 
-<div class="genre-guide"><div class="genre-guide-inner"><p>フレックス・サイドカットのR値・重量が選択の三軸。初心者はソフトフレックスで扱いやすい板を、中〜上級者はターン性能と安定性のバランスで選ぶ。楽天の売れ筋は入門セットが上位に入りやすいが、RevRankでは実際にゲレンデで滑り込んだスキーヤーの「カービングの切れ味」「高速域での安定感」といった具体的な口コミを集計。スキルに合った一本選びをデータでサポートする。</p></div></div>
+<div class="genre-guide"><div class="genre-guide-inner"><p>フレックス・サイドカットのR値・重量が選択の三軸。初心者はソフトフレックスで扱いやすい板を、中〜上級者はターン性能と安定性のバランスで選ぶ。楽天の売れ筋は入門セットが上位に入りやすいが、RevRankは評価点と件数のベイズ補正スコアで並べ直す。実際にゲレンデで使い続けた購入者から高評価を安定して受けた板が上位に残る。</p></div></div>
 <div class="hero"><div class="hero-inner">
   <div class="hero-head">
     <div class="hero-title">ランク推移チャート — 上位5商品</div>
@@ -507,7 +507,7 @@ button{cursor:pointer;border:none;background:none;font:inherit;color:inherit}
 <script>
 (function(){
   if(localStorage.getItem('rrAdmin')) return;
-  var w='';
+  var w='https://revrank-analytics.revrank-api.workers.dev';
   if(!w) return;
   try{ fetch(w+'/track',{method:'POST',headers:{'Content-Type':'application/json'},
     body:JSON.stringify({p:location.pathname,r:document.referrer}),keepalive:true}).catch(function(){}); }catch(e){}
