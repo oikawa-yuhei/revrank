@@ -1,7 +1,5 @@
-"""
-build_site.py — RevRank 静的サイトジェネレーター
-各ジャンルごとに docs/{slug}/index.html を生成し、
-docs/index.html（トップ）と docs/sitemap.xml も作る。
+"""build_site.py v2 — RevRank 静的サイトジェネレーター
+3指標 (口コミランク / コスパランク / バズランク) + RevRankスコアによる製品カード表示。
 
 使い方:
     python build_site.py                  # 全ジャンル
@@ -10,7 +8,7 @@ docs/index.html（トップ）と docs/sitemap.xml も作る。
 
 import base64, hashlib, json, math, os, re, sqlite3, sys, time
 import urllib.request
-from datetime import date
+from datetime import date, timedelta
 from pathlib import Path
 
 from dotenv import load_dotenv
@@ -20,13 +18,21 @@ sys.path.insert(0, str(Path(__file__).parent))
 from ichiba.config import DB_PATH, GENRES
 
 # ── サイト設定 ──────────────────────────────────────────────
-SITE_NAME   = "RevRank"
-BASE_URL    = "https://oikawa-yuhei.github.io/revrank"
-DOCS_DIR    = Path(__file__).parent / "docs"
-CACHE_DIR   = Path(__file__).parent / "data" / "img_cache"
-APP_ID      = os.environ.get("RAKUTEN_ICHIBA_APP_ID", "")
+SITE_NAME    = "RevRank"
+BASE_URL     = "https://oikawa-yuhei.github.io/revrank"
+DOCS_DIR     = Path(__file__).parent / "docs"
+CACHE_DIR    = Path(__file__).parent / "data" / "img_cache"
+APP_ID       = os.environ.get("RAKUTEN_ICHIBA_APP_ID", "")
+WORKER_URL   = os.environ.get("ANALYTICS_WORKER_URL", "")  # Cloudflare Worker URL
 DOCS_DIR.mkdir(parents=True, exist_ok=True)
 CACHE_DIR.mkdir(parents=True, exist_ok=True)
+
+# 製品カラーパレット (上位5製品)
+PCOLS = ["#d4922a", "#3b6fe0", "#059669", "#9333ea", "#9ca3af"]
+
+# スコア計算の最低データ日数
+MIN_DAYS_COSPA = 14
+MIN_DAYS_BUZZ  = 14
 
 # ── ジャンルメタ ─────────────────────────────────────────────
 GENRE_META = {
@@ -160,7 +166,7 @@ latest_date = conn.execute(
     "SELECT MAX(fetched_date) FROM item_rankings"
 ).fetchone()[0]
 
-# ── クリーニング ─────────────────────────────────────────────
+# ── テキストクリーニング ─────────────────────────────────────
 _PROMO_IN_BRACKET = re.compile(
     r'(?:\d+[倍%]|OFF|%引き?|限定|クーポン|ランキング|\d+位|まで|迄|'
     r'\d+円|セール|特価|送料|あす楽|無料|期間|先着|\bSALE\b|受注|予約|'
@@ -171,8 +177,7 @@ _PROMO_IN_BRACKET = re.compile(
 )
 
 def _is_promo_bracket(content):
-    if _PROMO_IN_BRACKET.search(content):
-        return True
+    if _PROMO_IN_BRACKET.search(content): return True
     return not re.search(r'[A-Za-z]{4,}', content)
 
 def clean_name(raw):
@@ -266,7 +271,7 @@ def clean_caption(raw):
     if len(s) > 100: s = s[:100].rstrip() + '…'
     return s
 
-# ── 画像 ────────────────────────────────────────────────────
+# ── 画像キャッシュ ────────────────────────────────────────────
 def fetch_datauri(url):
     if not url: return ""
     url = url.replace("_ex=64x64", "_ex=128x128")
@@ -288,662 +293,456 @@ def fetch_datauri(url):
         print(f"  SKIP {url[:60]} — {e}", file=sys.stderr)
         return ""
 
-# ── データ取得 ──────────────────────────────────────────────
-def load_genre(key):
-    rows = conn.execute("""
-        SELECT rank, item_code, item_name, item_price,
-               review_count, review_average, item_url, affiliate_url,
-               image_url, shop_name, item_caption
-        FROM item_rankings
-        WHERE genre_key=? AND fetched_date=?
-        ORDER BY rank LIMIT 30
-    """, (key, latest_date)).fetchall()
-    items = [dict(r) for r in rows]
+# ── 口コミランク (ベイズ平均 → 0-100) ───────────────────────
+def compute_kuchikomi(items):
+    reviewed = [i for i in items if (i['review_count'] or 0) > 0 and (i['review_average'] or 0) > 0]
+    if not reviewed:
+        return {i['item_code']: None for i in items}
+    avg_rc = sum(i['review_count'] for i in reviewed) / len(reviewed)
+    avg_ra = sum(i['review_average'] for i in reviewed) / len(reviewed)
+    raw = {}
     for item in items:
-        history = conn.execute("""
-            SELECT fetched_date, rank, review_count, review_average
-            FROM item_rankings WHERE genre_key=? AND item_code=?
-            ORDER BY fetched_date
-        """, (key, item["item_code"])).fetchall()
-        hist = []
-        for h in history:
-            rc = h["review_count"] or 0; ra = h["review_average"] or 0
-            hist.append({"d": h["fetched_date"], "r": h["rank"],
-                         "s": round(math.log10(rc+1)*ra, 2)})
-        item["history"] = hist
-        old = conn.execute("""
-            SELECT review_count FROM item_rankings
-            WHERE genre_key=? AND item_code=? AND fetched_date <= date(?, '-7 days')
+        rc = item['review_count'] or 0
+        ra = item['review_average'] or 0
+        raw[item['item_code']] = None if rc == 0 else (avg_rc * avg_ra + rc * ra) / (avg_rc + rc)
+    valid = [v for v in raw.values() if v is not None]
+    if not valid:
+        return {k: None for k in raw}
+    mn, mx = min(valid), max(valid)
+    rng = mx - mn or 1
+    return {c: round((v - mn) / rng * 100) if v is not None else None for c, v in raw.items()}
+
+# ── コスパランク (90日価格履歴 → 0-100) ─────────────────────
+def compute_cospa(key, items, today_str):
+    since = (date.fromisoformat(today_str) - timedelta(days=90)).isoformat()
+    scores = {}
+    for item in items:
+        code = item['item_code']
+        cur  = item['item_price'] or 0
+        if not cur:
+            scores[code] = None; continue
+        rows = conn.execute("""
+            SELECT item_price FROM item_rankings
+            WHERE genre_key=? AND item_code=? AND fetched_date >= ? AND item_price > 0
+        """, (key, code, since)).fetchall()
+        prices = [r[0] for r in rows]
+        if len(prices) < MIN_DAYS_COSPA:
+            scores[code] = None; continue
+        mn, mx = min(prices), max(prices)
+        scores[code] = 50 if mx == mn else round((mx - cur) / (mx - mn) * 100)
+    return scores
+
+# ── バズランク (楽天ランク変化 + 口コミ速度 → 0-100) ────────
+def compute_buzz(key, items, today_str):
+    since = (date.fromisoformat(today_str) - timedelta(days=30)).isoformat()
+    results = {}
+    for item in items:
+        code = item['item_code']
+        first = conn.execute(
+            "SELECT MIN(fetched_date) FROM item_rankings WHERE genre_key=? AND item_code=?",
+            (key, code)).fetchone()[0] or today_str
+        days = (date.fromisoformat(today_str) - date.fromisoformat(first)).days + 1
+
+        if days < MIN_DAYS_BUZZ:
+            label = '初登場' if days <= 3 else f'{days}日目'
+            results[code] = (None, label, ''); continue
+
+        old_rank_row = conn.execute("""
+            SELECT rank FROM item_rankings
+            WHERE genre_key=? AND item_code=? AND fetched_date <= ?
             ORDER BY fetched_date DESC LIMIT 1
-        """, (key, item["item_code"], latest_date)).fetchone()
-        if not old:
-            old = conn.execute("""
-                SELECT review_count FROM item_rankings
-                WHERE genre_key=? AND item_code=?
-                ORDER BY fetched_date ASC LIMIT 1
-            """, (key, item["item_code"])).fetchone()
-        item["delta_rc"] = max(0, (item["review_count"] or 0) - ((old["review_count"] if old else None) or 0))
-    for item in items:
-        rc = item["review_count"] or 0; ra = item["review_average"] or 0
-        delta = item.get("delta_rc", 0) or 0
-        item["community_score"] = math.log10(rc+1)*ra*(1+math.log10(delta+1))
-        item["rakuten_rank"]    = item["rank"]
-        item["item_name"]       = clean_name(item["item_name"])
-        item["item_caption"]    = clean_caption(item.get("item_caption") or "")
-        item["shop_name"]       = item.get("shop_name") or ""
-    reviewed  = [i for i in items if i["review_count"] > 0]
-    no_review = [i for i in items if i["review_count"] == 0]
-    reviewed.sort(key=lambda i: i["community_score"], reverse=True)
-    for idx, item in enumerate(reviewed): item["rank"] = idx + 1
-    return reviewed + no_review
+        """, (key, code, since)).fetchone()
+        old_rank = (old_rank_row[0] if old_rank_row else None) or item['rank']
 
-def prefetch_images(items, label):
-    for i, item in enumerate(items):
-        url = (item.get("image_url") or "").replace("_ex=64x64", "_ex=128x128")
-        cached = url and (CACHE_DIR / hashlib.md5(url.encode()).hexdigest()).exists()
-        item["img"] = fetch_datauri(item.get("image_url") or "")
-        if not cached: time.sleep(0.12)
-        print(f"  [{i+1}/{len(items)}] {'C' if cached else 'F'} {label} #{item['rakuten_rank']}", file=sys.stderr)
+        old_rc_row = conn.execute("""
+            SELECT review_count FROM item_rankings
+            WHERE genre_key=? AND item_code=? AND fetched_date <= ?
+            ORDER BY fetched_date DESC LIMIT 1
+        """, (key, code, since)).fetchone()
+        cur_rc  = item['review_count'] or 0
+        old_rc  = ((old_rc_row[0] if old_rc_row else None) or cur_rc) or 0
+        rc_delta = max(0, cur_rc - old_rc)
 
-# ── チャート生成 ─────────────────────────────────────────────
-CHART_COLORS = ["#2563EB","#16A34A","#DC2626","#D97706","#7C3AED",
-                "#0891B2","#BE185D","#059669","#B45309","#4F46E5"]
+        rank_change  = old_rank - item['rank']
+        rank_score   = min(100, max(0, 50 + rank_change * 2))
+        vel_score    = min(100, rc_delta / max(old_rc, 1) * 300)
+        score        = round(rank_score * 0.6 + vel_score * 0.4)
 
-def _fmt_price(p):
-    if p >= 100000: return f"¥{p//10000}万"
-    if p >= 10000:  return f"¥{p/10000:.1f}万"
-    if p >= 1000:   return f"¥{p//1000}千"
-    return f"¥{p}"
+        detail = (f'30日で{rank_change}位↑' if rank_change > 3 else
+                  f'+{rc_delta:,}件/30日' if rc_delta > 5 else '')
+        results[code] = (score, '', detail)
+    return results
 
-def render_bubble_chart(items):
-    """価格 × 口コミスコア バブルチャート (SVG)"""
-    scored = [i for i in items if i["review_count"] > 0 and i.get("item_price")]
-    if len(scored) < 3: return ""
+# ── RevRankスコア (加重平均、欠損は正規化) ──────────────────
+def compute_revrank(k_scores, c_scores, b_results):
+    out = {}
+    for code in k_scores:
+        k = k_scores.get(code)
+        c = c_scores.get(code)
+        b = (b_results.get(code) or (None, '', ''))[0]
+        num = den = 0
+        if k is not None: num += k * 0.5; den += 0.5
+        if c is not None: num += c * 0.3; den += 0.3
+        if b is not None: num += b * 0.2; den += 0.2
+        out[code] = (round(num / den), den < 0.99) if den > 0 else (None, True)
+    return out
 
-    W, H = 680, 320
-    PT, PR, PB, PL = 24, 24, 48, 58
-    iW, iH = W-PL-PR, H-PT-PB
-
-    prices = [i["item_price"] for i in scored]
-    scores = [i["community_score"] for i in scored]
-    revs   = [i["review_count"] for i in scored]
-    min_p, max_p = min(prices), max(prices)
-    max_s = max(scores) * 1.12
-    max_r = max(revs)
-    p_range = max(max_p - min_p, 1)
-
-    def cx(p): return PL + (p - min_p) / p_range * iW
-    def cy(s): return H - PB - s / max_s * iH
-    def cr(r): return max(6, min(26, math.sqrt(r / max_r) * 26))
-
-    # grid
-    lines = []
-    for t in [0.25, 0.5, 0.75, 1.0]:
-        y = cy(max_s * t); sv = f"{max_s*t:.1f}"
-        lines.append(f'<line x1="{PL}" y1="{y:.1f}" x2="{W-PR}" y2="{y:.1f}" stroke="currentColor" opacity=".07" stroke-dasharray="4,3"/>')
-        lines.append(f'<text x="{PL-6}" y="{y+3.5:.1f}" text-anchor="end" font-size="9" fill="currentColor" opacity=".35">{sv}</text>')
-    for t in [0, 0.25, 0.5, 0.75, 1.0]:
-        x = cx(min_p + p_range * t)
-        lines.append(f'<text x="{x:.1f}" y="{H-PB+16:.1f}" text-anchor="middle" font-size="9" fill="currentColor" opacity=".35">{_fmt_price(min_p + p_range*t)}</text>')
-
-    # quadrant labels (median split)
-    med_p = sorted(prices)[len(prices)//2]; med_s = sorted(scores)[len(scores)//2]
-    qx_l = cx(min_p + (med_p-min_p)*0.45); qx_r = cx(med_p + (max_p-med_p)*0.55)
-    qy_t = cy(med_s + (max_s-med_s)*0.55); qy_b = cy(med_s*0.45)
-    quads = [
-        (qx_l, qy_t, "コスパ優秀"), (qx_r, qy_t, "プレミアム"),
-        (qx_l, qy_b, "要検討"),     (qx_r, qy_b, "高価格低評価"),
-    ]
-    qlabels = "".join(
-        f'<text x="{x:.1f}" y="{y:.1f}" text-anchor="middle" font-size="10" fill="currentColor" opacity=".12" font-weight="700">{lbl}</text>'
-        for x, y, lbl in quads
-    )
-
-    # bubbles (draw small→large for z-order)
-    order = sorted(scored, key=lambda i: i["review_count"])
-    bubbles = []
-    for i, item in enumerate(order):
-        x = cx(item["item_price"]); y = cy(item["community_score"]); r = cr(item["review_count"])
-        c = CHART_COLORS[item["rank"] % len(CHART_COLORS)]
-        esc = item["item_name"].replace('"', '&quot;').replace('<', '&lt;')
-        bubbles.append(
-            f'<circle cx="{x:.1f}" cy="{y:.1f}" r="{r:.1f}" fill="{c}" opacity=".72" '
-            f'class="bc" data-n="{esc[:28]}" data-p="¥{item["item_price"]:,}" '
-            f'data-s="{item["community_score"]:.1f}" data-r="{item["rank"]}" '
-            f'data-c="{item["review_count"]:,}"/>'
-        )
-
-    # rank labels for top 3
-    rlabels = []
-    for item in scored[:3]:
-        x = cx(item["item_price"]); y = cy(item["community_score"]); r = cr(item["review_count"])
-        rlabels.append(f'<text x="{x:.1f}" y="{y-r-5:.1f}" text-anchor="middle" font-size="10" font-weight="700" fill="currentColor" opacity=".6">{item["rank"]}位</text>')
-
-    axis = (f'<text x="{W/2:.0f}" y="{H-1}" text-anchor="middle" font-size="11" fill="currentColor" opacity=".4">価格</text>'
-            f'<text x="12" y="{H/2:.0f}" text-anchor="middle" font-size="11" fill="currentColor" opacity=".4" transform="rotate(-90,12,{H/2:.0f})">口コミスコア</text>')
-
-    return (f'<svg id="chart-bubble" viewBox="0 0 {W} {H}" width="100%" preserveAspectRatio="xMidYMid meet" class="cr-chart">'
-            + "".join(lines) + qlabels + "".join(bubbles) + "".join(rlabels) + axis + "</svg>")
-
-
-def render_ts_chart(items):
-    """スコア推移 折れ線グラフ (SVG)"""
-    top5 = [i for i in items if i["review_count"] > 0 and len(i.get("history", [])) >= 2][:5]
-    if not top5: return ""
-    all_dates = sorted(set(h["d"] for i in top5 for h in i["history"]))
-    if len(all_dates) < 2: return ""
-
-    W, H = 680, 260
-    PT, PR, PB, PL = 16, 16, 36, 48
-    iW, iH = W-PL-PR, H-PT-PB
-
-    all_s = [h["s"] for i in top5 for h in i["history"]]
-    max_s = max(all_s) * 1.1 or 1; min_s = min(all_s) * 0.9
-    s_range = max_s - min_s or 1
-    n = len(all_dates)
-
-    def px(i): return PL + i / (n-1) * iW
-    def py(s): return H - PB - (s - min_s) / s_range * iH
-
-    grid = []
-    for t in [0.25, 0.5, 0.75, 1.0]:
-        s = min_s + s_range * t; y = py(s)
-        grid.append(f'<line x1="{PL}" y1="{y:.1f}" x2="{W-PR}" y2="{y:.1f}" stroke="currentColor" opacity=".07" stroke-dasharray="4,3"/>')
-        grid.append(f'<text x="{PL-6}" y="{y+3:.1f}" text-anchor="end" font-size="9" fill="currentColor" opacity=".35">{s:.1f}</text>')
-
-    show_dates = [all_dates[0]] + [d for d in all_dates[1:-1] if all_dates.index(d) % max(1, n//5) == 0] + [all_dates[-1]]
-    for d in show_dates:
-        i = all_dates.index(d); x = px(i)
-        grid.append(f'<text x="{x:.1f}" y="{H-PB+14:.1f}" text-anchor="middle" font-size="9" fill="currentColor" opacity=".35">{d[5:]}</text>')
-
-    series = []
-    legend = []
-    for ci, item in enumerate(top5):
-        c = CHART_COLORS[ci]
-        smap = {h["d"]: h["s"] for h in item["history"]}
-        pts  = [(px(i), py(smap[d])) for i, d in enumerate(all_dates) if d in smap]
-        if len(pts) < 2: continue
-        poly = " ".join(f"{x:.1f},{y:.1f}" for x, y in pts)
-        # area fill
-        area = f"M {pts[0][0]:.1f} {H-PB} " + " ".join(f"L {x:.1f} {y:.1f}" for x, y in pts) + f" L {pts[-1][0]:.1f} {H-PB} Z"
-        series.append(f'<path d="{area}" fill="{c}" opacity=".08"/>')
-        series.append(f'<polyline points="{poly}" fill="none" stroke="{c}" stroke-width="2" stroke-linejoin="round" opacity=".9"/>')
-        lx, ly = pts[-1]
-        series.append(f'<circle cx="{lx:.1f}" cy="{ly:.1f}" r="4" fill="{c}"/>')
-        name = item["item_name"][:18] + ("…" if len(item["item_name"]) > 18 else "")
-        legend.append(f'<div class="ts-leg-item"><span style="background:{c}" class="ts-dot"></span><span>{name}</span></div>')
-
-    return (f'<svg id="chart-ts" viewBox="0 0 {W} {H}" width="100%" preserveAspectRatio="xMidYMid meet" class="cr-chart">'
-            + "".join(grid) + "".join(series) + "</svg>"
-            + f'<div class="ts-legend">{"".join(legend)}</div>')
-
-
-# ── 時系列分析 ─────────────────────────────────────────────────
-
-def get_genre_dates(key):
-    rows = conn.execute("""
+# ── アイテムメタ (バッジ判定) ────────────────────────────────
+def get_meta(key, code, today_str):
+    first = conn.execute(
+        "SELECT MIN(fetched_date) FROM item_rankings WHERE genre_key=? AND item_code=?",
+        (key, code)).fetchone()[0] or today_str
+    days = (date.fromisoformat(today_str) - date.fromisoformat(first)).days + 1
+    gap = None
+    recent = conn.execute("""
         SELECT DISTINCT fetched_date FROM item_rankings
-        WHERE genre_key=? ORDER BY fetched_date
-    """, (key,)).fetchall()
-    return [r[0] for r in rows]
+        WHERE genre_key=? AND item_code=? ORDER BY fetched_date DESC LIMIT 60
+    """, (key, code)).fetchall()
+    dates = [r[0] for r in recent]
+    for i in range(len(dates) - 1):
+        g = (date.fromisoformat(dates[i]) - date.fromisoformat(dates[i+1])).days
+        if g > 7: gap = g; break
+    return {'is_new': days <= 7, 'days': days, 'gap': gap}
 
+# ── ヒーローチャートSVG (Python生成) ─────────────────────────
+def _hero_svg(series_list, invert=False):
+    """
+    series_list: [(color, thick:bool, name:str, values:list[int|None])]
+    values: 0-100スコアのリスト。長さ = データポイント数。
+    """
+    VW, VH = 240, 100
+    PL, PR, PT, PB = 26, 234, 6, 90
+    PW, PH = PR - PL, PB - PT
 
-def get_rank_matrix(key, codes, dates):
-    if not codes: return {}
-    ph = ",".join("?" * len(codes))
-    rows = conn.execute(f"""
-        SELECT item_code, fetched_date, rank FROM item_rankings
-        WHERE genre_key=? AND item_code IN ({ph})
-    """, (key, *codes)).fetchall()
-    matrix = {c: {} for c in codes}
-    for r in rows:
-        matrix[r[0]][r[1]] = r[2]
-    return matrix
+    has = any(vals and sum(1 for v in vals if v is not None) >= 2
+              for _, _, _, vals in series_list)
 
+    parts = [f'<svg viewBox="0 0 {VW} {VH}" class="cpanel-svg">']
+    if not has:
+        parts += [
+            f'<text x="{VW//2}" y="44" text-anchor="middle" font-size="9" fill="currentColor" opacity=".35">データ蓄積中</text>',
+            f'<text x="{VW//2}" y="57" text-anchor="middle" font-size="8" fill="currentColor" opacity=".22">{MIN_DAYS_COSPA}日後に利用可能</text>',
+            '</svg>'
+        ]
+        return ''.join(parts)
 
-def compute_trends(key, scored):
-    result = []
-    for item in scored:
-        hist = item.get("history", [])
-        n = len(hist)
-        ref_rank  = hist[max(0, n - 7)]["r"] if n >= 2 else item["rank"]
-        ref_score = hist[max(0, n - 7)]["s"] if n >= 2 else item["community_score"]
-        result.append({
-            **item,
-            "rank_change":  ref_rank - item["rank"],
-            "score_change": round(item["community_score"] - ref_score, 2),
-            "first_date":   hist[0]["d"] if hist else (latest_date or ""),
-            "top3_days":    sum(1 for h in hist if h["r"] <= 3),
-            "days_tracked": n,
-        })
-    return result
+    def xof(i, n): return PL + (i / (n - 1) * PW if n > 1 else PW / 2)
+    def yof(v):
+        norm = (v or 0) / 100
+        return PB - (1 - norm if invert else norm) * PH
 
+    for v in [25, 50, 75, 100]:
+        y = yof(v)
+        parts.append(
+            f'<line x1="{PL}" x2="{PR}" y1="{y:.1f}" y2="{y:.1f}" '
+            f'stroke="currentColor" opacity=".08" stroke-width=".7" stroke-dasharray="3,3"/>')
+        parts.append(
+            f'<text x="{PL-3}" y="{y+3:.1f}" text-anchor="end" font-size="7" '
+            f'fill="currentColor" opacity=".28">{v}</text>')
 
-def render_hero_ts(scored, trends_data):
-    """Hero section time-series chart with 📈👑🆕 badge annotations on line endpoints."""
-    top5 = [i for i in scored if len(i.get("history", [])) >= 2][:5]
-    if len(top5) < 2: return "", {}, {}
-    all_dates = sorted(set(h["d"] for i in top5 for h in i["history"]))
-    if len(all_dates) < 2: return "", {}, {}
+    parts.append(f'<text x="{PL}" y="{PB+9}" text-anchor="start" font-size="7" fill="currentColor" opacity=".28">90日前</text>')
+    parts.append(f'<text x="{PR}" y="{PB+9}" text-anchor="end" font-size="7" fill="currentColor" opacity=".28">今日</text>')
 
-    color_map = {item["item_code"]: CHART_COLORS[ci] for ci, item in enumerate(top5)}
-
-    # Assign trend badges to chart items
-    badge_map = {}
-    assigned  = set()
-    rising    = sorted([t for t in trends_data if t["rank_change"] > 0],
-                       key=lambda t: t["rank_change"], reverse=True)
-    newcomers = ([t for t in sorted(trends_data, key=lambda t: t["first_date"], reverse=True)
-                  if t["days_tracked"] <= 7]
-                 or sorted(trends_data, key=lambda t: t["first_date"], reverse=True))
-    stable    = sorted([t for t in trends_data if t["top3_days"] > 0],
-                       key=lambda t: t["top3_days"], reverse=True)
-
-    def assign(candidates, badge):
-        for t in candidates:
-            if t["item_code"] not in assigned and t["item_code"] in color_map:
-                badge_map[t["item_code"]] = badge
-                assigned.add(t["item_code"])
-                return
-    assign(rising,    "📈")
-    assign(stable,    "👑")
-    assign(newcomers, "🆕")
-
-    W, H = 760, 200
-    PT, PR, PB, PL = 12, 180, 32, 50
-    iW, iH = W - PL - PR, H - PT - PB
-    n = len(all_dates)
-
-    all_s = [h["s"] for i in top5 for h in i["history"]]
-    max_s = max(all_s) * 1.12 or 1
-    min_s = min(all_s) * 0.9
-    s_rng = max_s - min_s or 1
-
-    def px(i): return PL + i / (n - 1) * iW if n > 1 else PL + iW / 2
-    def py(s): return H - PB - (s - min_s) / s_rng * iH
-
-    parts = []
-    # grid
-    for t in [0.25, 0.5, 0.75, 1.0]:
-        s = min_s + s_rng * t; y = py(s)
-        parts.append(f'<line x1="{PL}" y1="{y:.1f}" x2="{W-PR}" y2="{y:.1f}" stroke="currentColor" opacity=".07" stroke-dasharray="3,4"/>')
-        parts.append(f'<text x="{PL-5}" y="{y+3:.1f}" text-anchor="end" font-size="9" fill="currentColor" opacity=".28">{s:.1f}</text>')
-    # date labels
-    show_idx = sorted({0, n - 1} | ({n // 2} if n > 4 else set()))
-    for di in show_idx:
-        if 0 <= di < n:
-            parts.append(f'<text x="{px(di):.1f}" y="{H-PB+12:.1f}" text-anchor="middle" font-size="9" fill="currentColor" opacity=".28">{all_dates[di][5:]}</text>')
-
-    # series
-    raw_labels = []
-    for ci, item in enumerate(top5):
-        c    = color_map[item["item_code"]]
-        smap = {h["d"]: h["s"] for h in item["history"]}
-        pts  = [(px(i), py(smap[d])) for i, d in enumerate(all_dates) if d in smap]
-        if len(pts) < 2: continue
-        poly = " ".join(f"{x:.1f},{y:.1f}" for x, y in pts)
-        area = (f"M {pts[0][0]:.1f} {H-PB} "
-                + " ".join(f"L {x:.1f} {y:.1f}" for x, y in pts)
-                + f" L {pts[-1][0]:.1f} {H-PB} Z")
-        parts.append(f'<path d="{area}" fill="{c}" opacity=".07"/>')
-        badge = badge_map.get(item["item_code"], "")
-        sw = "3" if badge else "2"
-        parts.append(f'<polyline points="{poly}" fill="none" stroke="{c}" stroke-width="{sw}" stroke-linejoin="round" opacity=".88"/>')
+    for color, thick, _, vals in series_list:
+        if not vals: continue
+        valid_pts = [(i, v) for i, v in enumerate(vals) if v is not None]
+        if len(valid_pts) < 2: continue
+        n  = len(vals)
+        sw = "2" if thick else "1"
+        so = "1" if thick else ".5"
+        fo = ".10" if thick else ".04"
+        pts = [(xof(i, n), yof(v)) for i, v in valid_pts]
+        area = f"{pts[0][0]:.1f},{PB} " + " ".join(f"{x:.1f},{y:.1f}" for x, y in pts) + f" {pts[-1][0]:.1f},{PB}"
+        parts.append(f'<polygon points="{area}" fill="{color}" fill-opacity="{fo}"/>')
+        line = " ".join(f"{x:.1f},{y:.1f}" for x, y in pts)
+        parts.append(f'<polyline points="{line}" fill="none" stroke="{color}" stroke-width="{sw}" stroke-linejoin="round" stroke-opacity="{so}"/>')
         lx, ly = pts[-1]
-        r = "5.5" if badge else "4"
-        parts.append(f'<circle cx="{lx:.1f}" cy="{ly:.1f}" r="{r}" fill="{c}"/>')
-        if badge:
-            parts.append(f'<circle cx="{lx:.1f}" cy="{ly:.1f}" r="10" fill="{c}" opacity=".18"/>')
-        raw_labels.append((ly, c, badge, item["item_name"]))
+        r = "2.5" if thick else "1.5"
+        parts.append(f'<circle cx="{lx:.1f}" cy="{ly:.1f}" r="{r}" fill="{color}" opacity="{so}"/>')
 
-    # right-side labels with collision avoidance
-    raw_labels.sort(key=lambda x: x[0])
-    used_ys = []
-    for ly, c, badge, name in raw_labels:
-        ay = float(ly)
-        for uy in used_ys:
-            if abs(ay - uy) < 15: ay = uy + 15
-        used_ys.append(ay)
-        lx  = W - PR + 8
-        nm  = name[:14] + ("…" if len(name) > 14 else "")
-        bdg = (badge + " ") if badge else ""
-        fw  = "700" if badge else "400"
-        parts.append(f'<circle cx="{lx-4}" cy="{ay:.1f}" r="3" fill="{c}"/>')
-        parts.append(f'<text x="{lx+4}" y="{ay+3.5:.1f}" font-size="10" font-weight="{fw}" fill="currentColor" opacity=".75">{bdg}{nm}</text>')
+    parts.append('</svg>')
+    return ''.join(parts)
 
-    svg = f'<svg viewBox="0 0 {W} {H}" width="100%" class="hero-chart">' + "".join(parts) + "</svg>"
-    return svg, color_map, badge_map
+def _hero_legend(series_list):
+    items = []
+    for color, thick, name, vals in series_list:
+        has = vals and sum(1 for v in vals if v is not None) >= 2
+        op  = "1" if thick else ".5"
+        nd  = ' <span style="font-size:9px;color:var(--ink3)">収集中</span>' if not has else ''
+        items.append(
+            f'<div class="legend-item{" legend-nd" if not has else ""}">'
+            f'<span class="legend-dot" style="background:{color};opacity:{op}"></span>'
+            f'<span>{name}{nd}</span></div>')
+    return '<div class="cpanel-legend">' + ''.join(items) + '</div>'
 
+# ── ヒーローチャートデータ (90日) ────────────────────────────
+def load_hero_data(key, top5, today_str):
+    since = (date.fromisoformat(today_str) - timedelta(days=90)).isoformat()
+    codes = [i['item_code'] for i in top5]
+    if not codes: return [], [], []
 
-def render_trend_dashboard(trends, color_map=None):
-    rising    = sorted([t for t in trends if t["rank_change"] > 0],
-                       key=lambda t: t["rank_change"], reverse=True)[:3]
-    newcomers = sorted(trends, key=lambda t: t["first_date"], reverse=True)
-    newcomers = [t for t in newcomers if t["days_tracked"] <= 7][:3] or newcomers[:3]
-    stable    = sorted([t for t in trends if t["top3_days"] > 0],
-                       key=lambda t: (t["top3_days"], -t["rank"]), reverse=True)[:3]
-
-    cm = color_map or {}
-
-    def mini_card(item, extra):
-        img = (f'<img src="{item["img"]}" alt="" style="width:40px;height:40px;object-fit:cover;border-radius:6px;flex-shrink:0">'
-               if item.get("img") else
-               f'<div style="width:40px;height:40px;display:flex;align-items:center;justify-content:center;font-size:22px;background:var(--bg);border-radius:6px;flex-shrink:0">📦</div>')
-        nm = item["item_name"][:22] + ("…" if len(item["item_name"]) > 22 else "")
-        cc = cm.get(item["item_code"], "")
-        dot = (f'<span class="td-chart-dot" style="background:{cc}" title="チャートに表示"></span>' if cc else "")
-        return (f'<a class="td-card" href="{item["affiliate_url"] or item["item_url"]}" '
-                f'target="_blank" rel="noopener sponsored">{dot}{img}'
-                f'<div class="td-info"><div class="td-name">{nm}</div>{extra}</div></a>')
-
-    def panel(icon, title, items_list, extra_fn):
-        if not items_list:
-            return f'<div class="td-panel"><div class="td-ptitle">{icon} {title}</div><p class="td-empty">データ収集中...</p></div>'
-        return (f'<div class="td-panel"><div class="td-ptitle">{icon} {title}</div>'
-                + "".join(mini_card(it, extra_fn(it)) for it in items_list) + '</div>')
-
-    p1 = panel("📈", "急上昇中", rising,
-               lambda t: f'<div class="td-stat up">ランク +{t["rank_change"]} → 現在{t["rank"]}位</div>')
-    p2 = panel("🆕", "今週の新顔", newcomers,
-               lambda t: f'<div class="td-stat">初登場 {t["first_date"]} &nbsp; {t["rank"]}位</div>')
-    p3 = panel("👑", "安定王者", stable,
-               lambda t: f'<div class="td-stat">{t["top3_days"]}日間 TOP3 → {t["rank"]}位</div>')
-
-    return (f'<div class="trend-sec"><div class="trend-in">'
-            f'<div class="trend-hd">今週この市場で何が起きているか</div>'
-            f'<div class="trend-grid">{p1}{p2}{p3}</div></div></div>')
-
-
-def render_heatmap(key, scored):
-    top_items = scored[:12]
-    dates = get_genre_dates(key)
-    if len(dates) < 2 or len(top_items) < 3: return ""
-    codes  = [i["item_code"] for i in top_items]
-    matrix = get_rank_matrix(key, codes, dates)
-
-    CW, CH, LW, DH = 30, 26, 136, 38
-    W = LW + len(dates) * CW + 14
-    H = DH + len(top_items) * CH + 6
-
-    def color(r):
-        if r is None: return "var(--bdr)"
-        return f"rgba(37,99,235,{0.12 + (1 - (r-1)/29.0) * 0.82:.2f})"
-
-    parts = []
-    for di, d in enumerate(dates):
-        x = LW + di * CW + CW // 2
-        parts.append(f'<text x="{x}" y="{DH-5}" text-anchor="middle" '
-                     f'font-size="9" fill="currentColor" opacity=".38"'
-                     f' transform="rotate(-45,{x},{DH-5})">{d[5:]}</text>')
-    for ri, item in enumerate(top_items):
-        y  = DH + ri * CH
-        nm = item["item_name"][:13] + ("…" if len(item["item_name"]) > 13 else "")
-        parts.append(f'<text x="{LW-5}" y="{y+CH//2+4}" text-anchor="end" '
-                     f'font-size="10" fill="currentColor" opacity=".65">{nm}</text>')
-        for di, d in enumerate(dates):
-            rk   = matrix.get(item["item_code"], {}).get(d)
-            col  = color(rk)
-            cx2  = LW + di * CW
-            parts.append(f'<rect x="{cx2+1}" y="{y+1}" width="{CW-2}" height="{CH-2}" fill="{col}" rx="2"/>')
-            if rk:
-                parts.append(f'<text x="{cx2+CW//2}" y="{y+CH//2+4}" text-anchor="middle" '
-                              f'font-size="9" font-weight="700" fill="white" opacity=".9">{rk}</text>')
-
-    return (f'<div style="overflow-x:auto"><svg viewBox="0 0 {W} {H}" '
-            f'width="{W}" height="{H}" class="cr-chart" style="min-width:{min(W,320)}px">'
-            + "".join(parts) + "</svg></div>")
-
-
-def render_velocity_bar(scored):
-    by_vel = sorted([i for i in scored if (i.get("delta_rc") or 0) > 0],
-                    key=lambda i: i["delta_rc"], reverse=True)[:8]
-    if not by_vel: return ""
-    max_d = max(i["delta_rc"] for i in by_vel) or 1
-    BH, GAP, LW2, BMAX = 26, 8, 128, 340
-    W2 = LW2 + BMAX + 80
-    H2 = len(by_vel) * (BH + GAP)
-    parts = []
-    for i, item in enumerate(by_vel):
-        y  = i * (BH + GAP)
-        bw = max(4, item["delta_rc"] / max_d * BMAX)
-        nm = item["item_name"][:15] + ("…" if len(item["item_name"]) > 15 else "")
-        parts.append(f'<text x="{LW2-28}" y="{y+BH//2+4}" text-anchor="end" '
-                     f'font-size="9" fill="var(--acc)" opacity=".7" font-family="monospace">{item["rank"]}位</text>')
-        parts.append(f'<text x="{LW2-5}" y="{y+BH//2+4}" text-anchor="end" '
-                     f'font-size="10" fill="currentColor" opacity=".65">{nm}</text>')
-        parts.append(f'<rect x="{LW2}" y="{y+2}" width="{bw:.1f}" height="{BH-4}" '
-                     f'fill="var(--acc)" opacity=".72" rx="3"/>')
-        parts.append(f'<text x="{LW2+bw+7}" y="{y+BH//2+4}" '
-                     f'font-size="10" font-weight="700" fill="currentColor" opacity=".55">+{item["delta_rc"]:,}件</text>')
-    return (f'<svg viewBox="0 0 {W2} {H2}" width="100%" class="cr-chart" style="min-width:280px">'
-            + "".join(parts) + "</svg>")
-
-
-def render_animation(key, scored):
-    candidates = [i for i in scored if i.get("item_price") and i["review_count"] > 0]
-    if len(candidates) < 3: return "", ""
-    all_dates = get_genre_dates(key)
-    if len(all_dates) < 2: return "", ""
-
-    codes = [i["item_code"] for i in candidates]
-    ph = ",".join("?" * len(codes))
+    ph   = ','.join('?' * len(codes))
     rows = conn.execute(f"""
-        SELECT item_code, fetched_date, review_count, review_average, item_price
-        FROM item_rankings WHERE genre_key=? AND item_code IN ({ph}) ORDER BY fetched_date
-    """, (key, *codes)).fetchall()
+        SELECT item_code, fetched_date, review_count, review_average, item_price, rank
+        FROM item_rankings
+        WHERE genre_key=? AND item_code IN ({ph}) AND fetched_date >= ?
+        ORDER BY fetched_date
+    """, (key, *codes, since)).fetchall()
 
-    score_map = {c: {} for c in codes}
+    hist = {c: [] for c in codes}
     for r in rows:
-        rc = r[2] or 0; ra = r[3] or 0
-        score_map[r[0]][r[1]] = {"rc": rc, "ra": ra,
-                                  "s": round(math.log10(rc + 1) * ra, 2), "p": r[4] or 0}
+        hist[r['item_code']].append(dict(r))
 
-    names   = {i["item_code"]: i["item_name"][:18] for i in candidates}
-    cmap    = {i["item_code"]: CHART_COLORS[idx % len(CHART_COLORS)]
-               for idx, i in enumerate(candidates)}
-    frames  = []
-    for d in all_dates:
-        frame = [{"c": code, "p": sd["p"], "s": sd["s"], "rc": sd["rc"], "n": names[code]}
-                 for code in codes if (sd := score_map[code].get(d)) and sd["p"] > 0]
-        frames.append({"d": d, "items": frame})
+    reviewed = [i for i in top5 if (i.get('review_count') or 0) > 0]
+    avg_rc = sum(i['review_count'] for i in reviewed) / len(reviewed) if reviewed else 100
+    avg_ra = sum(i['review_average'] for i in reviewed) / len(reviewed) if reviewed else 4.0
 
-    fj = json.dumps(frames,  ensure_ascii=False, separators=(",", ":"))
-    cj = json.dumps(cmap,    ensure_ascii=False, separators=(",", ":"))
+    all_dates = sorted(set(r['fetched_date'] for recs in hist.values() for r in recs))
+    if not all_dates: return [], [], []
 
-    ctrl = (
-        '<div class="anim-ctrl">'
-        '<button class="anim-btn" id="anim-play" onclick="animToggle()">▶ 再生</button>'
-        f'<input type="range" id="anim-slider" min="0" max="{len(all_dates)-1}" value="0" '
-        'style="flex:1;min-width:80px" oninput="animGoto(+this.value)">'
-        f'<span class="anim-date" id="anim-date">{all_dates[0]}</span>'
-        '</div>'
-        '<svg id="anim-svg" viewBox="0 0 680 300" width="100%" class="cr-chart"></svg>'
-        '<div id="anim-leg" class="ts-legend" style="margin-top:10px"></div>'
-    )
+    # 口コミランク時系列
+    k_raw = []
+    for code in codes:
+        by_d = {r['fetched_date']: r for r in hist[code]}
+        pts  = []
+        for d in all_dates:
+            r = by_d.get(d)
+            if r and (r['review_count'] or 0) > 0 and (r['review_average'] or 0) > 0:
+                b = (avg_rc * avg_ra + r['review_count'] * r['review_average']) / (avg_rc + r['review_count'])
+                pts.append(b)
+            else:
+                pts.append(None)
+        k_raw.append((code, pts))
+    all_k = [v for _, pts in k_raw for v in pts if v is not None]
+    if all_k:
+        mn, mx = min(all_k), max(all_k); rng = mx - mn or 1
+        k_series = [(c, [round((v - mn) / rng * 100) if v is not None else None for v in pts]) for c, pts in k_raw]
+    else:
+        k_series = k_raw
 
-    js = (
-        "(function(){"
-        f"var F={fj},CM={cj};"
-        "var svg=document.getElementById('anim-svg');if(!svg)return;"
-        "var NS='http://www.w3.org/2000/svg';"
-        "var W=680,H=300,PL=58,PR=24,PT=18,PB=44,iW=W-PL-PR,iH=H-PT-PB;"
-        "var aP=F.flatMap(function(f){return f.items.map(function(i){return i.p})});"
-        "var aS=F.flatMap(function(f){return f.items.map(function(i){return i.s})});"
-        "var aR=F.flatMap(function(f){return f.items.map(function(i){return i.rc})});"
-        "if(!aP.length)return;"
-        "var mnP=Math.min.apply(null,aP),mxP=Math.max.apply(null,aP);"
-        "var mxS=Math.max.apply(null,aS)*1.12||1,mxR=Math.max.apply(null,aR)||1;"
-        "function cx(p){return PL+(p-mnP)/(mxP-mnP||1)*iW}"
-        "function cy(s){return H-PB-s/mxS*iH}"
-        "function cr(r){return Math.max(7,Math.min(28,Math.sqrt(r/mxR)*28))}"
-        "function fP(p){return p>=10000?'¥'+Math.round(p/1000)/10+'万':'¥'+p.toLocaleString('ja-JP')}"
-        "function el(t,a){var e=document.createElementNS(NS,t);for(var k in a)e.setAttribute(k,a[k]);return e}"
-        "function tx(t,a,s){var e=el(t,a);e.textContent=s;return e}"
-        "var gG=el('g',{});svg.appendChild(gG);"
-        "[.25,.5,.75,1].forEach(function(t){"
-        "var y=cy(mxS*t);"
-        "gG.appendChild(el('line',{x1:PL,y1:y,x2:W-PR,y2:y,stroke:'currentColor',opacity:.07,'stroke-dasharray':'4,3'}));"
-        "gG.appendChild(tx('text',{x:PL-5,y:y+3,'text-anchor':'end','font-size':9,fill:'currentColor',opacity:.35},(mxS*t).toFixed(1)));"
-        "});"
-        "[0,.25,.5,.75,1].forEach(function(t){"
-        "var p=mnP+(mxP-mnP)*t,x=cx(p);"
-        "gG.appendChild(tx('text',{x:x,y:H-PB+14,'text-anchor':'middle','font-size':9,fill:'currentColor',opacity:.35},fP(p)));"
-        "});"
-        "gG.appendChild(tx('text',{x:W/2,y:H,'text-anchor':'middle','font-size':11,fill:'currentColor',opacity:.4},'価格'));"
-        "gG.appendChild(tx('text',{x:12,y:H/2,'text-anchor':'middle','font-size':11,fill:'currentColor',opacity:.4,transform:'rotate(-90,12,'+(H/2)+')'},'口コミスコア'));"
-        "var codes=[],seen={};"
-        "F.forEach(function(f){f.items.forEach(function(i){if(!seen[i.c]){seen[i.c]=1;codes.push(i.c)}})});"
-        "var gB=el('g',{});svg.appendChild(gB);"
-        "var bubbles={};"
-        "codes.forEach(function(c){"
-        "var b=el('circle',{r:7,fill:CM[c]||'#2563EB',opacity:.75});"
-        "b.style.transition='cx .6s ease,cy .6s ease,r .6s ease';"
-        "gB.appendChild(b);bubbles[c]=b;"
-        "});"
-        "var leg=document.getElementById('anim-leg');"
-        "if(leg)leg.innerHTML=codes.slice(0,10).map(function(c){"
-        "var nm=F.flatMap(function(f){return f.items}).find(function(i){return i.c===c});"
-        "return '<div class=\"ts-leg-item\"><span class=\"ts-dot\" style=\"background:'+(CM[c]||'#2563EB')+'\"></span><span>'+(nm?nm.n:c)+'</span></div>';"
-        "}).join('');"
-        "var cur=0,playing=false,timer=null;"
-        "function drawFrame(n){"
-        "var frame=F[n];if(!frame)return;"
-        "var present={};"
-        "frame.items.forEach(function(item){"
-        "present[item.c]=1;"
-        "var b=bubbles[item.c];if(!b)return;"
-        "b.setAttribute('cx',cx(item.p).toFixed(1));"
-        "b.setAttribute('cy',cy(item.s).toFixed(1));"
-        "b.setAttribute('r',cr(item.rc).toFixed(1));"
-        "b.style.display='';"
-        "});"
-        "codes.forEach(function(c){if(!present[c]&&bubbles[c])bubbles[c].style.display='none'});"
-        "var dEl=document.getElementById('anim-date');if(dEl)dEl.textContent=frame.d;"
-        "var sl=document.getElementById('anim-slider');if(sl)sl.value=n;"
-        "cur=n;"
-        "}"
-        "window.animToggle=function(){"
-        "var btn=document.getElementById('anim-play');"
-        "if(playing){clearInterval(timer);playing=false;if(btn)btn.textContent='▶ 再生';}"
-        "else{if(cur>=F.length-1)cur=0;playing=true;if(btn)btn.textContent='⏸ 停止';"
-        "timer=setInterval(function(){cur++;if(cur>=F.length){clearInterval(timer);playing=false;if(btn)btn.textContent='▶ 再生';return;}drawFrame(cur);},900);"
-        "}"
-        "};"
-        "window.animGoto=function(n){"
-        "if(playing){clearInterval(timer);playing=false;var btn=document.getElementById('anim-play');if(btn)btn.textContent='▶ 再生';}"
-        "drawFrame(n);"
-        "};"
-        "drawFrame(0);"
-        "})();"
-    )
-    return ctrl, js
+    # コスパランク時系列 (アイテム個別の90日価格レンジ基準)
+    c_series = []
+    for code in codes:
+        by_d   = {r['fetched_date']: r for r in hist[code]}
+        prices = [r['item_price'] for r in hist[code] if r['item_price'] and r['item_price'] > 0]
+        if len(prices) < MIN_DAYS_COSPA:
+            c_series.append((code, [None] * len(all_dates))); continue
+        mn_p, mx_p = min(prices), max(prices)
+        pts = []
+        for d in all_dates:
+            r = by_d.get(d)
+            p = r['item_price'] if r and r['item_price'] else None
+            if p is None: pts.append(None)
+            elif mx_p == mn_p: pts.append(50)
+            else: pts.append(round((mx_p - p) / (mx_p - mn_p) * 100))
+        c_series.append((code, pts))
 
+    # バズランク時系列 (楽天ランク → 反転スコア)
+    b_series = []
+    for code in codes:
+        by_d  = {r['fetched_date']: r for r in hist[code]}
+        ranks = [r['rank'] for r in hist[code] if r['rank']]
+        if len(ranks) < 2:
+            b_series.append((code, [None] * len(all_dates))); continue
+        mn_r, mx_r = min(ranks), max(ranks)
+        pts = []
+        for d in all_dates:
+            r = by_d.get(d)
+            rk = r['rank'] if r and r['rank'] else None
+            if rk is None: pts.append(None)
+            elif mx_r == mn_r: pts.append(50)
+            else: pts.append(round((mx_r - rk) / (mx_r - mn_r) * 100))
+        b_series.append((code, pts))
 
-# ── バッジ ──────────────────────────────────────────────────
-HOT_THRESHOLD = 30   # 7日間 delta_rc がこれ以上 = 急上昇
+    return k_series, c_series, b_series
 
-def badges(item):
-    out = []
-    if item.get("delta_rc", 0) >= HOT_THRESHOLD:
-        out.append('<span class="badge-hot">🔥 急上昇</span>')
-    return "".join(out)
+def render_hero_section(key, top5, today_str):
+    k_data, c_data, b_data = load_hero_data(key, top5, today_str)
+    if not k_data:
+        return ''
 
-# ── カードレンダリング ────────────────────────────────────────
-def _stars_html(avg, cnt, cls="", code=""):
-    pct = f"{avg/5*100:.1f}"
-    c = code
-    ra_a = f' data-live-ra="{c}"' if c else ""
-    rc_a = f' data-live-rc="{c}"' if c else ""
-    sf_a = f' data-live-sf="{c}"' if c else ""
-    return (f'<div class="stars-row{" "+cls if cls else ""}">'
-            f'<span class="sw"><span class="sb">★★★★★</span>'
-            f'<span class="sf"{sf_a} style="width:{pct}%">★★★★★</span></span>'
-            f'<span class="sn"{ra_a}>{avg:.2f}</span>'
-            f'<span class="sc"{rc_a}>{cnt:,}件</span></div>')
+    def build_sl(series_data):
+        sl = []
+        for i, item in enumerate(top5):
+            code   = item['item_code']
+            color  = PCOLS[i] if i < len(PCOLS) else '#64748b'
+            thick  = i < 3
+            name   = item['item_name'][:14] + ('…' if len(item['item_name']) > 14 else '')
+            vals   = next((pts for c, pts in series_data if c == code), [])
+            sl.append((color, thick, name, vals))
+        return sl
 
-def _spark(history):
-    if not history or len(history) < 7: return ""
-    ranks = [h["r"] for h in history]
-    W, H = 100, 18
-    mn, mx = min(ranks), max(ranks); rng = mx-mn or 1
-    pts = " ".join(f"{i/(len(ranks)-1)*W:.1f},{(r-mn)/rng*H:.1f}" for i, r in enumerate(ranks))
-    return (f'<div class="spark"><svg viewBox="0 0 {W} {H}" preserveAspectRatio="none">'
-            f'<polyline points="{pts}" fill="none" stroke="rgba(255,255,255,.85)" stroke-width="1.5" stroke-linejoin="round"/>'
-            f'</svg></div>')
+    sl_k = build_sl(k_data)
+    sl_c = build_sl(c_data)
+    sl_b = build_sl(b_data)
 
-def _rk(item):
-    diff = item["rakuten_rank"] - item["rank"]
-    if diff > 0:   return f'楽天{item["rakuten_rank"]}位→<span class="up">↑{diff}</span>'
-    elif diff < 0: return f'楽天{item["rakuten_rank"]}位→<span class="dn">↓{abs(diff)}</span>'
-    else:          return f'楽天{item["rakuten_rank"]}位（同順）'
+    svg_k = _hero_svg(sl_k)
+    svg_c = _hero_svg(sl_c)
+    svg_b = _hero_svg(sl_b)
+    legend = _hero_legend(sl_k)
 
-def render_podium(item, rank_label, emoji):
-    img = (f'<img src="{item["img"]}" alt="" loading="eager">'
-           if item.get("img") else f'<div class="pfallback">{emoji}</div>')
-    nc  = {1:"pn1",2:"pn2",3:"pn3"}.get(item["rank"],"")
-    num = f'<div class="pnum {nc}">{rank_label}</div>'
-    stars = _stars_html(item["review_average"], item["review_count"], code=item["item_code"]) if item["review_count"] > 0 else ""
-    desc  = f'<p class="pdesc">{item["item_caption"]}</p>' if item.get("item_caption") else ""
-    shop  = f'<p class="pshop">🏪 {item["shop_name"]}</p>' if item.get("shop_name") else ""
-    rk    = f'<span class="prk">{_rk(item)}</span>' if item["review_count"] > 0 else ""
-    price = f'¥{item["item_price"]:,}' if item.get("item_price") else ""
-    bdg   = badges(item)
-    return f"""<a class="pcard{'  p1' if item['rank']==1 else ''}"
-   href="{item['affiliate_url'] or item['item_url']}" target="_blank" rel="noopener sponsored"
-   data-code="{item['item_code']}">
-  <div class="pimg">{img}{num}{_spark(item["history"])}</div>
-  <div class="pbody">
-    <p class="pname">{item['item_name']}</p>
-    {bdg}{stars}{desc}{shop}
-    <div class="pfoot">
-      <span class="pprice" data-live="{item['item_code']}">{price}</span>
-      {rk}
+    return f'''<div class="hero-inner">
+  <div class="hero-head">
+    <div class="hero-title">ランク推移チャート — 上位5商品</div>
+    <div class="hero-note">過去90日 · 線の色 = 各カード左帯と対応</div>
+  </div>
+  <div class="charts-grid">
+    <div class="cpanel">
+      <div class="cpanel-head">
+        <div class="cpanel-title"><span class="kw">口コミ</span>ランク</div>
+        <div class="cpanel-period">過去90日</div>
+      </div>
+      {svg_k}
+      {legend}
+    </div>
+    <div class="cpanel">
+      <div class="cpanel-head">
+        <div class="cpanel-title"><span class="kw">コスパ</span>ランク</div>
+        <div class="cpanel-period">過去90日</div>
+      </div>
+      {svg_c}
+    </div>
+    <div class="cpanel">
+      <div class="cpanel-head">
+        <div class="cpanel-title"><span class="kw">バズ</span>ランク</div>
+        <div class="cpanel-period">過去90日</div>
+      </div>
+      {svg_b}
     </div>
   </div>
-</a>"""
+</div>'''
 
-def render_card(item, emoji):
-    img   = (f'<img src="{item["img"]}" alt="" loading="lazy">'
-             if item.get("img") else f'<div class="cfallback">{emoji}</div>')
-    num   = f'<div class="cnum">{item["rank"]}位</div>' if item["review_count"] > 0 else ""
-    stars = (_stars_html(item["review_average"], item["review_count"], "sm", item["item_code"])
-             if item["review_count"] > 0 else '<span class="no-rev">レビューなし</span>')
-    desc  = f'<p class="cdesc">{item["item_caption"]}</p>' if item.get("item_caption") else ""
-    shop  = f'<p class="cshop">🏪 {item["shop_name"]}</p>' if item.get("shop_name") else ""
-    rk    = f'<span class="crk">{_rk(item)}</span>' if item["review_count"] > 0 else ""
-    price = f'¥{item["item_price"]:,}' if item.get("item_price") else ""
-    bdg   = badges(item)
-    return f"""<a class="card{'  no-data' if not item['review_count'] else ''}"
-   href="{item['affiliate_url'] or item['item_url']}" target="_blank" rel="noopener sponsored">
-  <div class="cimg">{img}{num}{_spark(item["history"])}</div>
-  <div class="cbody">
-    <p class="cname">{item['item_name']}</p>
-    {bdg}{stars}{desc}{shop}
-    <div class="cfoot">
-      <span class="cprice" data-live="{item['item_code']}">{price}</span>
-      {rk}
+# ── スコア色クラス ───────────────────────────────────────────
+def _sc(s):
+    if s is None: return 'col-mute'
+    if s >= 70: return 'col-good'
+    if s >= 40: return 'col-warn'
+    return 'col-mute'
+
+# ── 製品カード (mvert サイドバー付き) ───────────────────────
+RANK_CLS = {1: 'rank-1', 2: 'rank-2', 3: 'rank-3'}
+
+def _rank_diff_html(revrank_pos, rakuten_rank):
+    """RevRank順位と楽天順位の差分バッジHTML。|diff| < 3 なら非表示。"""
+    diff = rakuten_rank - revrank_pos  # 正 = RevRankが楽天より高評価 (隠れ名品)
+    if abs(diff) < 3:
+        return '<span class="rank-diff" style="display:none"></span>'
+    if diff > 0:
+        return f'<span class="rank-diff gem">楽天比 +{diff}↑</span>'
+    return f'<span class="rank-diff overr">楽天比 {diff}↓</span>'
+
+_MEDAL = {1: '🥇', 2: '🥈', 3: '🥉'}
+_TINT  = {
+    1: 'color-mix(in srgb, var(--gold) 6%, transparent)',
+    2: 'color-mix(in srgb, var(--silver) 5%, transparent)',
+    3: 'color-mix(in srgb, var(--bronze) 5%, transparent)',
+}
+
+def render_pcard(rank, color, item, k_sc, c_sc, b_sc, b_label, rv, is_prov, meta):
+    rakuten_rank = item.get('rank') or rank
+    featured = rank <= 3
+    rk_cls   = RANK_CLS.get(rank, 'rank-n')
+    emoji    = GENRE_META.get(item.get('genre_key', ''), {}).get('emoji', '📦')
+    isize    = 100 if featured else 60
+    card_cls = 'pcard pcard-feat' if featured else 'pcard pcard-compact'
+    bg_style = f' style="background:{_TINT[rank]}"' if rank in _TINT else ''
+
+    img_html = (
+        f'<img src="{item["img"]}" alt="" loading="lazy" style="width:{isize}px;height:{isize}px;object-fit:cover">'
+        if item.get('img') else
+        f'<div style="width:{isize}px;height:{isize}px;display:flex;align-items:center;justify-content:center;font-size:{28 if featured else 20}px">{emoji}</div>'
+    )
+    price_html = f'<span class="pcard-price">¥{item["item_price"]:,}</span>' if item.get('item_price') else ''
+    stars_html = (
+        f'<div class="pcard-stars"><span class="s">★</span>{item["review_average"]:.2f}（{item["review_count"]:,}件）</div>'
+        if (item.get('review_count') or 0) > 0 else ''
+    )
+    new_bdg  = '<span class="mvert-badge">NEW</span>' if meta['is_new'] else ''
+    ret_bdg  = (f'<span class="mvert-badge ret">{meta["gap"]}日ぶり復帰</span>' if meta.get('gap') else '')
+    medal    = f'<span class="medal">{_MEDAL[rank]}</span>' if rank in _MEDAL else ''
+    diff_html = _rank_diff_html(rank, rakuten_rank)
+
+    if rv is None:
+        rv_html = '<div class="mvert-total-val col-mute">—</div>'
+    elif is_prov:
+        rv_html = (f'<div class="mvert-total-val {_sc(rv)}" style="opacity:.72">{rv}'
+                   f'<span class="prov">暫定</span></div>')
+    else:
+        rv_html = f'<div class="mvert-total-val {_sc(rv)}">{rv}</div>'
+
+    def mval(sc, lbl=''):
+        if lbl:
+            return f'<div class="mvert-val" style="font-size:11px;color:var(--good);font-weight:800">{lbl}</div>'
+        if sc is None:
+            return '<div class="mvert-val mvert-nd">—</div>'
+        return f'<div class="mvert-val {_sc(sc)}">{sc}</div>'
+
+    link = item.get('affiliate_url') or item.get('item_url') or '#'
+
+    return f'''<div class="{card_cls}" data-code="{item["item_code"]}" data-rakuten-rank="{rakuten_rank}"{bg_style}>
+  <div class="pcard-body">
+    <div class="pcard-accent" style="background:{color}"></div>
+    <div class="pcard-rank">
+      <span class="rank-num {rk_cls}"><span class="medal">{_MEDAL.get(rank,'')}</span><span class="rank-n-val">{rank}</span></span><span class="rank-lbl">位</span>
+      <span class="rank-r">楽天 {rakuten_rank}位</span>
+      {diff_html}
+    </div>
+    <div class="pcard-img">{img_html}</div>
+    <div class="pcard-info">
+      <div class="pcard-name">{item["item_name"]}</div>
+      <div class="pcard-price-row">{price_html} {new_bdg}{ret_bdg}</div>
+      {stars_html}
+      <a class="btn-r" href="{link}" target="_blank" rel="noopener sponsored">楽天で見る ↗</a>
+    </div>
+    <div class="mvert">
+      <div class="mvert-total">
+        <div class="mvert-total-lbl">RevRank</div>
+        {rv_html}
+      </div>
+      <div class="mvert-subs">
+        <div class="mvert-item">
+          <div class="mvert-lbl"><span class="kw">口コミ</span><span class="sf">ランク</span></div>
+          {mval(k_sc)}
+        </div>
+        <div class="mvert-item">
+          <div class="mvert-lbl"><span class="kw">コスパ</span><span class="sf">ランク</span></div>
+          {mval(c_sc)}
+        </div>
+        <div class="mvert-item">
+          <div class="mvert-lbl"><span class="kw">バズ</span><span class="sf">ランク</span></div>
+          {mval(b_sc, b_label)}
+        </div>
+      </div>
     </div>
   </div>
-</a>"""
+</div>'''
 
 # ── CSS ─────────────────────────────────────────────────────
 CSS = """
 :root {
-  --bg:#F4F6FB; --sur:#FFF; --ink:#0F172A; --ink2:#475569; --ink3:#94A3B8;
-  --acc:#2563EB; --bdr:#E2E8F0; --gold:#F59E0B; --up:#16A34A; --dn:#DC2626;
-  --shd:0 1px 3px rgba(0,0,0,.07),0 4px 16px rgba(0,0,0,.05);
-  --r:10px; --sans:-apple-system,'Hiragino Kaku Gothic ProN','Hiragino Sans',sans-serif;
+  --bg:#f0f2f8; --sur:#ffffff; --sur2:#f8f9fc; --bdr:#e1e4ee;
+  --ink:#18192a; --ink2:#6a6d86; --ink3:#b0b4cc;
+  --acc:#d4922a;
+  --good:#059669; --warn:#d97706; --danger:#dc2626; --info:#3b6fe0;
+  --gold:#f59e0b; --silver:#9ca3af; --bronze:#b45309;
+  --r:12px;
+  --sans:-apple-system,BlinkMacSystemFont,'Hiragino Sans','Yu Gothic UI',sans-serif;
   --mono:'SF Mono',Consolas,monospace;
+  --p1:#d4922a; --p2:#3b6fe0; --p3:#059669; --p4:#9333ea; --p5:#9ca3af;
 }
 @media(prefers-color-scheme:dark){:root:not([data-theme="light"]){
-  --bg:#0B1120;--sur:#111827;--ink:#F1F5F9;--ink2:#94A3B8;--ink3:#475569;
-  --acc:#60A5FA;--bdr:#1E293B;--gold:#FCD34D;--up:#4ADE80;--dn:#F87171;
-  --shd:0 1px 3px rgba(0,0,0,.3),0 4px 16px rgba(0,0,0,.25);
+  --bg:#0a0b15; --sur:#131524; --sur2:#1a1d30; --bdr:#252840;
+  --ink:#e2e5f5; --ink2:#8a8eaa; --ink3:#454968;
+  --acc:#f5b842; --good:#34d399; --warn:#fbbf24; --danger:#f87171; --info:#5b8af8;
+  --gold:#fbbf24; --bronze:#d97706;
+  --p1:#f5b842; --p2:#5b8af8; --p3:#34d399; --p4:#c084fc; --p5:#6b7280;
 }}
 :root[data-theme="dark"]{
-  --bg:#0B1120;--sur:#111827;--ink:#F1F5F9;--ink2:#94A3B8;--ink3:#475569;
-  --acc:#60A5FA;--bdr:#1E293B;--gold:#FCD34D;--up:#4ADE80;--dn:#F87171;
-  --shd:0 1px 3px rgba(0,0,0,.3),0 4px 16px rgba(0,0,0,.25);
+  --bg:#0a0b15; --sur:#131524; --sur2:#1a1d30; --bdr:#252840;
+  --ink:#e2e5f5; --ink2:#8a8eaa; --ink3:#454968;
+  --acc:#f5b842; --good:#34d399; --warn:#fbbf24; --danger:#f87171; --info:#5b8af8;
+  --gold:#fbbf24; --bronze:#d97706;
+  --p1:#f5b842; --p2:#5b8af8; --p3:#34d399; --p4:#c084fc; --p5:#6b7280;
 }
 *,*::before,*::after{box-sizing:border-box;margin:0;padding:0}
 html{scroll-behavior:smooth}
@@ -951,549 +750,156 @@ body{background:var(--bg);color:var(--ink);font-family:var(--sans);font-size:15p
 a{color:inherit;text-decoration:none} img{display:block;max-width:100%}
 button{cursor:pointer;border:none;background:none;font:inherit;color:inherit}
 
-/* NAV */
-.nav{background:var(--sur);border-bottom:1px solid var(--bdr);position:sticky;top:0;z-index:100}
-.nav-in{max-width:1080px;margin:0 auto;padding:0 20px;height:52px;display:flex;align-items:center;gap:12px}
-.nav-logo{font-size:16px;font-weight:900;letter-spacing:-.03em;color:var(--acc)}
-.nav-logo span{color:var(--ink2);font-weight:400;font-size:12px;margin-left:4px}
-.nav-sep{width:1px;height:16px;background:var(--bdr);flex-shrink:0}
-.nav-genre{font-size:13px;font-weight:700;color:var(--ink2);overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
-.nav-date{margin-left:auto;font-family:var(--mono);font-size:11px;color:var(--ink3);white-space:nowrap}
-.nav-live{display:inline-flex;align-items:center;gap:4px;font-size:10px;font-weight:700;
-  color:var(--acc);font-family:var(--mono);margin-left:6px}
-.nav-live::before{content:'';width:6px;height:6px;border-radius:50%;background:var(--acc);
-  animation:pulse 1.8s ease-in-out infinite}
-@keyframes pulse{0%,100%{opacity:1}50%{opacity:.3}}
-
-/* BREADCRUMB */
-.bc{max-width:1080px;margin:0 auto;padding:12px 20px 0;font-size:12px;color:var(--ink3);display:flex;gap:6px}
-.bc a{color:var(--acc)}.bc-sep{opacity:.4}
+/* PAGE HEADER */
+.page-header{background:var(--sur);border-bottom:1px solid var(--bdr);padding:18px 20px 0;max-width:800px;margin:0 auto}
+.site-eye{font-size:10px;font-weight:900;letter-spacing:.12em;color:var(--acc);margin-bottom:10px}
+.site-eye span{color:var(--ink2);font-weight:400}
+.genre-h{font-size:20px;font-weight:900;color:var(--ink);margin-bottom:3px}
+.genre-sub{font-size:12px;color:var(--ink2);margin-bottom:14px}
+.tabs{display:flex;border-top:1px solid var(--bdr);margin:0 -20px}
+.tab{padding:9px 16px;font-size:12px;font-weight:700;color:var(--ink2);border-bottom:2px solid transparent;cursor:pointer;transition:color .12s,border-color .12s}
+.tab:hover{color:var(--ink)}
+.tab.active{color:var(--acc);border-bottom-color:var(--acc)}
 
 /* HERO */
-.hero{background:var(--sur);border-bottom:1px solid var(--bdr);padding:40px 20px 36px}
-.hero-in{max-width:1080px;margin:0 auto}
-.eyebrow{font-size:11px;font-weight:700;letter-spacing:.1em;text-transform:uppercase;color:var(--acc);margin-bottom:10px}
-.h1{font-size:32px;font-weight:900;letter-spacing:-.04em;line-height:1.15;margin-bottom:8px}
-.h1 em{font-style:normal;color:var(--acc)}
-.hero-sub{font-size:14px;color:var(--ink2);max-width:560px;line-height:1.7}
-.hero-badges{display:flex;flex-wrap:wrap;gap:8px;margin-top:16px}
-.hbadge{display:inline-flex;align-items:center;gap:5px;font-size:11px;font-weight:600;
-  padding:4px 10px;border-radius:99px;border:1px solid var(--bdr);color:var(--ink2);background:var(--bg)}
-.hbadge.a{border-color:var(--acc);color:var(--acc);background:rgba(37,99,235,.07)}
-.hbadge.m{font-family:var(--mono)}
+.hero{max-width:800px;margin:0 auto;padding:16px 0 0}
+.hero-inner{background:var(--sur);border:1px solid var(--bdr);border-radius:var(--r);overflow:hidden}
+.hero-head{padding:14px 18px 12px;border-bottom:1px solid var(--bdr);display:flex;align-items:center;justify-content:space-between}
+.hero-title{font-size:12px;font-weight:800;color:var(--ink)}
+.hero-note{font-size:11px;color:var(--ink3)}
+.charts-grid{display:grid;grid-template-columns:1fr 1fr 1fr}
+@media(max-width:600px){.charts-grid{grid-template-columns:1fr}}
 
-/* FORMULA BAND */
-.fband{background:linear-gradient(135deg,rgba(37,99,235,.07),rgba(37,99,235,.02));
-  border:1px solid rgba(37,99,235,.18);border-radius:var(--r);
-  padding:14px 18px;margin-top:22px;display:flex;align-items:center;gap:14px;flex-wrap:wrap}
-.fform{font-family:var(--mono);font-size:13px;color:var(--acc);font-weight:700;white-space:nowrap}
-.fdesc{font-size:12px;color:var(--ink2);line-height:1.5}
+/* CHART PANEL */
+.cpanel{padding:14px 14px 12px;border-right:1px solid var(--bdr)}
+.cpanel:last-child{border-right:none}
+@media(max-width:600px){.cpanel{border-right:none;border-bottom:1px solid var(--bdr)}.cpanel:last-child{border-bottom:none}}
+.cpanel-head{display:flex;align-items:baseline;justify-content:space-between;margin-bottom:10px}
+.cpanel-title{font-size:14px;font-weight:900;line-height:1}
+.cpanel-title .kw{color:var(--acc)}
+.cpanel-period{font-size:10px;font-weight:700;color:var(--ink3);background:var(--sur2);padding:2px 7px;border-radius:20px}
+.cpanel-svg{width:100%;display:block}
+.cpanel-legend{margin-top:10px;display:flex;flex-direction:column;gap:4px}
+.legend-item{display:flex;align-items:center;gap:6px;font-size:10px;color:var(--ink2)}
+.legend-dot{width:8px;height:8px;border-radius:50%;flex-shrink:0}
+.legend-nd{opacity:.4}
 
-/* CHART SECTION */
-.chart-sec{max-width:1080px;margin:32px auto 0;padding:0 20px}
-.chart-hdr{display:flex;align-items:center;justify-content:space-between;margin-bottom:12px;flex-wrap:wrap;gap:8px}
-.chart-ttl{font-size:14px;font-weight:700;color:var(--ink2)}
-.chart-note{font-size:11px;color:var(--ink3);font-family:var(--mono)}
-.chart-sub{font-size:11px;color:var(--ink3);font-family:var(--mono);margin-bottom:10px;padding:6px 10px;background:var(--bg);border-radius:6px;display:inline-block}
-.chart-tabs{display:flex;gap:4px}
-.ctab{padding:5px 14px;border-radius:99px;font-size:12px;font-weight:600;
-  border:1px solid var(--bdr);color:var(--ink3);cursor:pointer;transition:all .12s}
-.ctab.on{border-color:var(--acc);color:var(--acc);background:rgba(37,99,235,.08)}
-.chart-box{background:var(--bg);border:1px solid var(--bdr);border-radius:var(--r);
-  padding:18px;overflow-x:auto;position:relative}
-.cr-chart{display:block;min-width:300px}
-.bc{cursor:pointer;transition:opacity .1s,r .1s}
-.bc:hover{opacity:1 !important}
-.ts-legend{display:flex;flex-wrap:wrap;gap:10px;margin-top:10px}
-.ts-leg-item{display:flex;align-items:center;gap:5px;font-size:11px;color:var(--ink2)}
-.ts-dot{width:8px;height:8px;border-radius:50%;flex-shrink:0}
+/* PRODUCT LIST — 2-column grid; featured cards span full width */
+.list-wrap{max-width:800px;margin:0 auto;padding:12px 0;display:grid;grid-template-columns:1fr 1fr;gap:10px}
+.pcard-feat{grid-column:span 2}
+.rank-divider{grid-column:span 2}
+@media(max-width:520px){.list-wrap{grid-template-columns:1fr}}
 
-/* BUBBLE TOOLTIP */
-#btip{position:fixed;pointer-events:none;display:none;z-index:999;
-  background:var(--sur);border:1px solid var(--bdr);border-radius:10px;
-  padding:10px 14px;font-size:12px;box-shadow:var(--shd);max-width:220px;line-height:1.6}
+/* PRODUCT CARD — base */
+.pcard{background:var(--sur);border:1px solid var(--bdr);border-radius:var(--r);overflow:hidden;display:flex;flex-direction:column;transition:box-shadow .15s,transform .15s}
+.pcard:hover{box-shadow:0 4px 20px rgba(0,0,0,.10);transform:translateY(-1px)}
+.pcard-body{display:flex;align-items:stretch}
+.pcard-accent{width:4px;flex-shrink:0}
 
-/* BEST3 SECTION */
-.best3-sec{max-width:1080px;margin:28px auto 0;padding:0 20px}
-.best3-hd{font-size:13px;font-weight:700;color:var(--ink2);letter-spacing:.05em;
-  text-transform:uppercase;display:flex;align-items:center;gap:10px;margin-bottom:14px}
-.best3-hd::after{content:'';flex:1;height:1px;background:var(--bdr)}
-.best3-hd .live-tag{font-size:9px;font-weight:700;color:var(--acc);font-family:var(--mono);
-  border:1px solid var(--acc);border-radius:3px;padding:0 4px;letter-spacing:.05em}
+/* RANK COLUMN */
+.pcard-rank{width:56px;flex-shrink:0;display:flex;align-items:center;justify-content:center;flex-direction:column;gap:1px;padding:0 4px}
+.rank-num{font-size:22px;font-weight:900;font-variant-numeric:tabular-nums;line-height:1;display:flex;align-items:center;gap:2px}
+.rank-lbl{font-size:8px;font-weight:700;color:var(--ink3);letter-spacing:.06em}
+.rank-1{color:var(--gold)} .rank-2{color:var(--silver)} .rank-3{color:var(--bronze)} .rank-n{color:var(--ink3);font-size:16px}
+.rank-r{font-size:9px;color:var(--ink3);font-weight:600;margin-top:3px;text-align:center;line-height:1.2}
+.rank-diff{font-size:8px;font-weight:800;padding:1px 4px;border-radius:3px;margin-top:2px;text-align:center;line-height:1.4}
+.rank-diff.gem{background:color-mix(in srgb,var(--good) 14%,transparent);color:var(--good)}
+.rank-diff.overr{background:color-mix(in srgb,var(--ink3) 12%,transparent);color:var(--ink3)}
+.medal{font-size:14px;line-height:1}
 
-/* PODIUM */
-.podium{display:grid;grid-template-columns:1fr 1fr 1fr;gap:14px}
-@media(max-width:600px){.podium{grid-template-columns:1fr}}
-.pcard{background:var(--sur);border:1px solid var(--bdr);border-radius:var(--r);
-  overflow:hidden;display:flex;flex-direction:column;box-shadow:var(--shd);
-  transition:transform .15s,box-shadow .15s}
-.pcard:hover{transform:translateY(-3px);box-shadow:0 8px 30px rgba(0,0,0,.12)}
-.pcard.p1{border-color:var(--gold);box-shadow:0 0 0 1.5px var(--gold),var(--shd)}
-.pimg{position:relative;aspect-ratio:1/1;background:var(--bg);overflow:hidden;
-  display:flex;align-items:center;justify-content:center}
-.pimg img{width:100%;height:100%;object-fit:cover}
-.pfallback{font-size:56px;line-height:1}
-.pnum{position:absolute;top:10px;left:10px;font-family:var(--mono);font-size:12px;
-  font-weight:700;color:#fff;padding:3px 8px;border-radius:5px;line-height:1.4}
-.pn1{background:var(--gold);color:#1a1200;font-size:14px}
-.pn2{background:var(--acc)}
-.pn3{background:#60A5FA}
-.pbody{padding:14px 14px 16px;flex:1;display:flex;flex-direction:column;gap:5px}
-.pname{font-size:13px;font-weight:700;line-height:1.4;
-  display:-webkit-box;-webkit-line-clamp:2;-webkit-box-orient:vertical;overflow:hidden}
-.pdesc{font-size:11px;color:var(--ink2);line-height:1.5;
-  display:-webkit-box;-webkit-line-clamp:2;-webkit-box-orient:vertical;overflow:hidden}
-.pshop{font-size:11px;color:var(--ink3)}
-.pfoot{display:flex;align-items:baseline;justify-content:space-between;
-  margin-top:auto;padding-top:8px;gap:8px}
-.pprice{font-family:var(--mono);font-size:16px;font-weight:700}
-.pprice.live-ok::after{content:'LIVE';font-size:8px;font-weight:700;
-  color:var(--acc);margin-left:4px;vertical-align:super}
-.sc.live-rc{transition:color .3s}
-.sc.live-rc-flash{color:var(--up)}
-.pprice.live-loading{opacity:.5}
-.prk{font-family:var(--mono);font-size:10px;color:var(--ink3)}
+/* IMAGE COLUMN */
+.pcard-img{flex-shrink:0;display:flex;align-items:center;justify-content:center;background:var(--sur2);border-left:1px solid var(--bdr);border-right:1px solid var(--bdr)}
 
-/* GRID */
-.sec{max-width:1080px;margin:32px auto 0;padding:0 20px}
-.sec-hd{font-size:13px;font-weight:700;color:var(--ink2);letter-spacing:.05em;
-  text-transform:uppercase;display:flex;align-items:center;gap:10px;margin-bottom:14px}
-.sec-hd::after{content:'';flex:1;height:1px;background:var(--bdr)}
-.cgrid{display:grid;grid-template-columns:repeat(5,1fr);gap:12px}
-@media(max-width:960px){.cgrid{grid-template-columns:repeat(4,1fr)}}
-@media(max-width:680px){.cgrid{grid-template-columns:repeat(3,1fr);gap:8px}}
-@media(max-width:440px){.cgrid{grid-template-columns:repeat(2,1fr)}}
-.card{background:var(--sur);border:1px solid var(--bdr);border-radius:var(--r);
-  overflow:hidden;display:flex;flex-direction:column;
-  transition:transform .15s,box-shadow .15s,border-color .15s}
-.card:hover{transform:translateY(-2px);box-shadow:var(--shd);border-color:var(--acc)}
-.card.no-data{opacity:.45}
-.cimg{position:relative;aspect-ratio:1/1;background:var(--bg);overflow:hidden;
-  display:flex;align-items:center;justify-content:center}
-.cimg img{width:100%;height:100%;object-fit:cover}
-.cfallback{font-size:36px;line-height:1}
-.cnum{position:absolute;top:7px;left:7px;font-family:var(--mono);font-size:11px;
-  font-weight:700;color:#fff;padding:2px 6px;border-radius:4px;background:rgba(15,23,42,.5)}
-.cbody{padding:9px 10px 11px;display:flex;flex-direction:column;gap:3px;flex:1}
-.cname{font-size:11px;font-weight:600;line-height:1.45;
-  display:-webkit-box;-webkit-line-clamp:2;-webkit-box-orient:vertical;overflow:hidden}
-.cdesc{font-size:10px;color:var(--ink2);line-height:1.4;
-  display:-webkit-box;-webkit-line-clamp:2;-webkit-box-orient:vertical;overflow:hidden}
-.cshop{font-size:10px;color:var(--ink3);white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
-.cfoot{margin-top:auto;padding-top:4px;display:flex;flex-direction:column;gap:1px}
-.cprice{font-family:var(--mono);font-size:13px;font-weight:700}
-.crk{font-family:var(--mono);font-size:10px;color:var(--ink3)}
+/* INFO COLUMN */
+.pcard-info{flex:1;min-width:0;display:flex;flex-direction:column;gap:4px}
+.pcard-name{font-weight:700;color:var(--ink);line-height:1.4;display:-webkit-box;-webkit-box-orient:vertical;overflow:hidden}
+.pcard-price-row{display:flex;align-items:center;gap:6px;flex-wrap:wrap}
+.pcard-price{font-weight:900;color:var(--ink);font-variant-numeric:tabular-nums}
+.pcard-stars{color:var(--ink2)} .pcard-stars .s{color:var(--gold)}
+.btn-r{font-size:11px;font-weight:600;color:var(--ink3);background:none;border:none;cursor:pointer;display:inline-flex;align-items:center;gap:3px;padding:0;letter-spacing:.01em;text-decoration:none}
+.btn-r:hover{color:var(--ink2)}
 
-/* STARS */
-.stars-row{display:flex;align-items:center;gap:5px}
-.stars-row.sm{gap:3px}
-.sw{position:relative;display:inline-block;font-size:14px;line-height:1;letter-spacing:2px}
-.stars-row.sm .sw{font-size:11px;letter-spacing:1px}
-.sb{color:var(--bdr)}
-.sf{position:absolute;top:0;left:0;overflow:hidden;white-space:nowrap;color:var(--gold);letter-spacing:2px}
-.stars-row.sm .sf{letter-spacing:1px}
-.sn{font-family:var(--mono);font-size:12px;font-weight:700;color:var(--ink2)}
-.stars-row.sm .sn{font-size:10px}
-.sc{font-family:var(--mono);font-size:11px;color:var(--ink3)}
-.stars-row.sm .sc{font-size:10px}
-.no-rev{font-size:10px;color:var(--ink3);font-family:var(--mono)}
+/* FEATURED (rank 1-3) */
+.pcard-feat{border-width:1.5px;box-shadow:0 2px 10px rgba(0,0,0,.07)}
+.pcard-feat .pcard-rank{width:64px}
+.pcard-feat .rank-num{font-size:30px}
+.pcard-feat .rank-lbl{font-size:9px}
+.pcard-feat .rank-r{font-size:10px}
+.pcard-feat .pcard-info{padding:14px 16px;gap:6px}
+.pcard-feat .pcard-name{font-size:14px;-webkit-line-clamp:3}
+.pcard-feat .pcard-price{font-size:19px}
+.pcard-feat .pcard-stars{font-size:12px}
 
-/* SPARK */
-.spark{position:absolute;bottom:0;left:0;right:0;height:24px;
-  background:linear-gradient(transparent,rgba(0,0,0,.3))}
-.spark svg{display:block;width:100%;height:20px;margin-top:4px}
+/* COMPACT (rank 4+) */
+.pcard-compact .pcard-rank{width:48px}
+.pcard-compact .rank-num{font-size:17px}
+.pcard-compact .rank-r{font-size:8px;margin-top:2px}
+.pcard-compact .rank-diff{font-size:7px;padding:1px 3px}
+.pcard-compact .pcard-info{padding:8px 12px;gap:3px}
+.pcard-compact .pcard-name{font-size:12px;-webkit-line-clamp:1}
+.pcard-compact .pcard-price{font-size:14px}
+.pcard-compact .pcard-stars{font-size:10px}
+.pcard-compact .mvert-total-val{font-size:24px}
+.pcard-compact .mvert-val{font-size:13px}
+.pcard-compact .mvert-lbl{font-size:8px}
+.pcard-compact .mvert-lbl .sf{font-size:7px}
 
-/* BADGES */
-.badge-hot{display:inline-flex;align-items:center;gap:3px;
-  font-size:9px;font-weight:700;padding:1px 6px;border-radius:3px;
-  background:#FEF3C7;color:#92400E;border:1px solid #FDE68A;margin-bottom:2px}
+/* SECTION DIVIDER */
+.rank-divider{display:flex;align-items:center;gap:10px;padding:4px 0;color:var(--ink3);font-size:11px;font-weight:700;letter-spacing:.06em}
+.rank-divider::before,.rank-divider::after{content:'';flex:1;height:1px;background:var(--bdr)}
 
-/* UP/DOWN */
-.up{color:var(--up);font-weight:700}.dn{color:var(--dn);font-weight:700}
+/* METRIC SIDEBAR */
+.mvert{width:110px;flex-shrink:0;border-left:1px solid var(--bdr);display:flex;flex-direction:column}
+.mvert-total{padding:10px 12px 8px;border-bottom:1px solid var(--bdr);text-align:center}
+.mvert-total-lbl{font-size:9px;font-weight:800;letter-spacing:.08em;color:var(--acc);text-transform:uppercase;margin-bottom:2px}
+.mvert-total-val{font-size:32px;font-weight:900;font-variant-numeric:tabular-nums;line-height:1;color:var(--ink)}
+.prov{font-size:9px;color:var(--ink3);vertical-align:middle;margin-left:2px}
+.mvert-subs{display:flex;flex-direction:column;flex:1}
+.mvert-item{flex:1;display:flex;align-items:center;justify-content:space-between;padding:0 10px;border-bottom:1px solid var(--bdr)}
+.mvert-item:last-child{border-bottom:none}
+.mvert-lbl{font-size:9px;font-weight:700;line-height:1.3}
+.mvert-lbl .kw{color:var(--acc);display:block}
+.mvert-lbl .sf{color:var(--ink3);font-size:8px}
+.mvert-val{font-size:15px;font-weight:900;font-variant-numeric:tabular-nums;line-height:1}
+.mvert-nd{color:var(--ink3) !important;font-size:12px !important}
+.mvert-badge{font-size:9px;font-weight:800;padding:1px 5px;border-radius:3px;background:color-mix(in srgb,var(--good) 15%,transparent);color:var(--good)}
+.mvert-badge.ret{background:color-mix(in srgb,var(--info) 15%,transparent);color:var(--info)}
 
-/* HERO CHART */
-.hero-chart{display:block;width:100%}
-.hc-tabs{display:flex;gap:4px;flex-wrap:wrap;margin-top:20px;margin-bottom:10px}
-.hctab{padding:5px 14px;border-radius:99px;font-size:12px;font-weight:600;
-  border:1px solid var(--bdr);color:var(--ink3);cursor:pointer;
-  transition:all .12s;background:none;font-family:var(--sans)}
-.hctab.on{border-color:var(--acc);color:var(--acc);background:rgba(37,99,235,.08)}
-.hero-chart-box{background:var(--bg);border:1px solid var(--bdr);border-radius:var(--r);
-  padding:14px;overflow-x:auto}
-.hero-chips{display:flex;flex-wrap:wrap;gap:8px;margin-top:12px}
-.hchip{display:inline-flex;align-items:center;gap:6px;font-size:11px;font-weight:600;
-  padding:4px 12px 4px 8px;border-radius:99px;background:var(--bg);
-  border:1px solid var(--bdr);color:var(--ink2)}
-.hchip-dot{width:8px;height:8px;border-radius:50%;flex-shrink:0}
-
-/* TREND DASHBOARD */
-.trend-sec{background:var(--sur);border-top:1px solid var(--bdr);border-bottom:1px solid var(--bdr);padding:22px 20px}
-.trend-in{max-width:1080px;margin:0 auto}
-.trend-hd{font-size:11px;font-weight:700;letter-spacing:.09em;text-transform:uppercase;color:var(--ink2);
-  display:flex;align-items:center;gap:10px;margin-bottom:12px}
-.trend-hd::after{content:'';flex:1;height:1px;background:var(--bdr)}
-.trend-grid{display:grid;grid-template-columns:repeat(3,1fr);gap:12px}
-@media(max-width:680px){.trend-grid{grid-template-columns:1fr}}
-.td-panel{background:var(--bg);border:1px solid var(--bdr);border-radius:var(--r);padding:14px 14px 10px;display:flex;flex-direction:column;gap:0}
-.td-ptitle{font-size:12px;font-weight:700;color:var(--ink2);margin-bottom:8px}
-.td-card{display:flex;align-items:center;gap:9px;padding:7px 0;border-bottom:1px solid var(--bdr);transition:opacity .1s}
-.td-card:last-child{border-bottom:none;padding-bottom:0}
-.td-card:hover{opacity:.78}
-.td-info{min-width:0;flex:1}
-.td-name{font-size:11px;font-weight:600;color:var(--ink);white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
-.td-stat{font-size:10px;font-family:var(--mono);color:var(--ink3);margin-top:1px}
-.td-stat.up{color:var(--up);font-weight:700}
-.td-empty{font-size:11px;color:var(--ink3);padding:10px 0;text-align:center;font-family:var(--mono)}
-.td-chart-dot{width:7px;height:7px;border-radius:50%;flex-shrink:0;margin-right:2px;opacity:.85}
-
-/* ANIMATION */
-.anim-ctrl{display:flex;align-items:center;gap:10px;margin-bottom:12px;flex-wrap:wrap}
-.anim-btn{padding:5px 18px;border-radius:99px;font-size:12px;font-weight:700;
-  border:1.5px solid var(--acc);color:var(--acc);background:rgba(37,99,235,.07);
-  cursor:pointer;transition:background .12s}
-.anim-btn:hover{background:rgba(37,99,235,.16)}
-.anim-date{font-family:var(--mono);font-size:12px;color:var(--ink3);white-space:nowrap;flex-shrink:0}
-input[type=range]{accent-color:var(--acc)}
+/* SCORE COLORS */
+.col-good{color:var(--good)} .col-warn{color:var(--warn)} .col-mute{color:var(--ink2)}
 
 /* RELATED */
-.related{max-width:1080px;margin:36px auto 0;padding:0 20px 60px}
-.rel-hd{font-size:13px;font-weight:700;color:var(--ink2);letter-spacing:.05em;
-  text-transform:uppercase;display:flex;align-items:center;gap:10px;margin-bottom:14px}
+.related{max-width:800px;margin:16px auto 60px;padding:0 20px}
+.rel-hd{font-size:12px;font-weight:700;color:var(--ink3);letter-spacing:.06em;text-transform:uppercase;display:flex;align-items:center;gap:10px;margin-bottom:12px}
 .rel-hd::after{content:'';flex:1;height:1px;background:var(--bdr)}
-.rel-grid{display:flex;flex-wrap:wrap;gap:8px}
-.rpill{display:inline-flex;align-items:center;gap:6px;padding:8px 16px;
-  border-radius:99px;font-size:13px;font-weight:600;border:1px solid var(--bdr);
-  color:var(--ink2);background:var(--sur);transition:border-color .12s,color .12s,background .12s}
-.rpill:hover{border-color:var(--acc);color:var(--acc);background:rgba(37,99,235,.06)}
-
-/* NO-REV DIVIDER */
-.norev-hd{margin:24px 0 12px;font-size:12px;font-weight:600;color:var(--ink3);
-  display:flex;align-items:center;gap:8px}
-.norev-hd::before,.norev-hd::after{content:'';flex:1;height:1px;background:var(--bdr)}
+.rel-links{display:flex;flex-wrap:wrap;gap:8px}
+.rel-link{display:inline-flex;align-items:center;gap:5px;font-size:12px;font-weight:600;padding:6px 14px;border-radius:99px;border:1px solid var(--bdr);color:var(--ink2);background:var(--sur);transition:border-color .12s,color .12s}
+.rel-link:hover{border-color:var(--acc);color:var(--acc)}
 
 /* FOOTER */
-.footer{background:var(--sur);border-top:1px solid var(--bdr);padding:24px 20px;
-  text-align:center;font-size:11px;color:var(--ink3);line-height:2}
-.footer a{color:var(--acc)}
+.footer{background:var(--sur);border-top:1px solid var(--bdr);padding:24px 20px;text-align:center;font-size:11px;color:var(--ink3);line-height:2;max-width:800px;margin:0 auto}
 
-@media(max-width:480px){.h1{font-size:24px}.podium{grid-template-columns:1fr}.fband{flex-direction:column;align-items:flex-start}}
+/* INDEX */
+.top-hero{background:var(--sur);border-bottom:1px solid var(--bdr);padding:60px 20px 48px;text-align:center}
+.top-in{max-width:640px;margin:0 auto}
+.top-logo{font-size:40px;font-weight:900;letter-spacing:-.05em;color:var(--acc);margin-bottom:6px}
+.top-sub{font-size:15px;color:var(--ink2);line-height:1.75;margin-bottom:20px}
+.top-badges{display:flex;flex-wrap:wrap;gap:8px;justify-content:center}
+.top-badge{display:inline-flex;align-items:center;gap:5px;font-size:11px;font-weight:600;padding:4px 10px;border-radius:99px;border:1px solid var(--bdr);color:var(--ink2);background:var(--sur2)}
+.top-badge.a{border-color:var(--acc);color:var(--acc);background:color-mix(in srgb,var(--acc) 8%,transparent)}
+.idx{max-width:800px;margin:40px auto 60px;padding:0 20px}
+.icat{margin-bottom:36px}
+.ich{font-size:12px;font-weight:700;color:var(--ink3);letter-spacing:.08em;text-transform:uppercase;display:flex;align-items:center;gap:10px;margin-bottom:14px}
+.ich::after{content:'';flex:1;height:1px;background:var(--bdr)}
+.igrid{display:grid;grid-template-columns:repeat(auto-fill,minmax(150px,1fr));gap:10px}
+.ic{background:var(--sur);border:1px solid var(--bdr);border-radius:var(--r);padding:16px;display:flex;flex-direction:column;gap:4px;transition:border-color .12s,box-shadow .12s,transform .12s}
+.ic:hover{border-color:var(--acc);box-shadow:0 2px 12px rgba(0,0,0,.08);transform:translateY(-2px)}
+.ie{font-size:26px;line-height:1;margin-bottom:2px}
+.il{font-size:13px;font-weight:700;color:var(--ink);line-height:1.3}
+.in{font-size:11px;color:var(--ink3);font-family:var(--mono)}
 """
 
-# ── ジャンルページ ───────────────────────────────────────────
-def build_genre_page(key, items):
-    m     = GENRE_META[key]
-    slug  = m["slug"]; label = m["label"]; emoji = m["emoji"]
-    desc  = m["desc"]; kw    = m["kw"]
-    page_url = f"{BASE_URL}/{slug}/"
-    year  = date.today().year
-
-    scored   = [i for i in items if i["review_count"] > 0]
-    no_rev   = [i for i in items if i["review_count"] == 0]
-    top3     = scored[:3]; rest = scored[3:]
-    rc_total = sum(i["review_count"] for i in scored)
-
-    # JSON-LD
-    ld_items = []
-    for item in scored[:10]:
-        li = {"@type":"ListItem","position":item["rank"],"item":{
-            "@type":"Product","name":item["item_name"],"url":item["item_url"],
-            "offers":{"@type":"Offer","price":str(item["item_price"] or 0),
-                      "priceCurrency":"JPY","availability":"https://schema.org/InStock"},
-            "aggregateRating":{"@type":"AggregateRating",
-                               "ratingValue":str(item["review_average"]),
-                               "reviewCount":str(item["review_count"])},
-        }}
-        if item.get("item_caption"): li["item"]["description"] = item["item_caption"]
-        ld_items.append(li)
-    jsonld = json.dumps({"@context":"https://schema.org","@type":"ItemList",
-        "name":f"{label} 口コミランキング","description":desc,"url":page_url,
-        "numberOfItems":len(scored),"itemListElement":ld_items},
-        ensure_ascii=False, indent=2)
-
-    # BreadcrumbList
-    breadcrumb_ld = json.dumps({"@context":"https://schema.org","@type":"BreadcrumbList",
-        "itemListElement":[
-            {"@type":"ListItem","position":1,"name":SITE_NAME,"item":f"{BASE_URL}/"},
-            {"@type":"ListItem","position":2,"name":f"{label} 口コミランキング","item":page_url},
-        ]}, ensure_ascii=False)
-
-    # FAQ schema
-    top1 = scored[0] if scored else None
-    faq_pairs = []
-    if top1:
-        faq_pairs.append((
-            f"{label}で一番口コミ評価が高い商品は？",
-            f"口コミスコア1位は「{top1['item_name'][:40]}」です。楽天市場で{top1['review_count']:,}件の口コミがあり、平均評点{top1['review_average']:.1f}点を獲得しています。",
-        ))
-    faq_pairs += [
-        (f"{label}のスコアはどうやって計算している？",
-         f"口コミ件数の多さ・評価点の高さ・直近7日間の口コミ増加数（話題性）の3要素を組み合わせた独自スコアです。楽天市場の公式データをもとに毎時更新しています。"),
-        (f"楽天の売れ筋ランキングと{label}の口コミランキングは違うの？",
-         f"異なります。楽天の売れ筋は販売数ベースですが、{SITE_NAME}の{label}ランキングは実際に購入した人の口コミ量・質・最近の話題性から算出しています。話題性はなくても長期間高評価を維持している商品が上位に来ることがあります。"),
-    ]
-    faq_ld = json.dumps({"@context":"https://schema.org","@type":"FAQPage",
-        "mainEntity":[{"@type":"Question","name":q,
-                        "acceptedAnswer":{"@type":"Answer","text":a}}
-                       for q,a in faq_pairs]}, ensure_ascii=False)
-
-    # charts
-    trends_data        = compute_trends(key, scored)
-    hero_svg, color_map, badge_map = render_hero_ts(scored, trends_data)
-    trend_html         = render_trend_dashboard(trends_data, color_map) if scored else ""
-    hm_svg             = render_heatmap(key, scored)
-    vel_svg            = render_velocity_bar(scored)
-    anim_ctrl, anim_js = render_animation(key, scored)
-    bubble             = render_bubble_chart(scored)
-
-    # Hero chart annotation chips
-    BADGE_LABEL = {"📈": "急上昇", "🆕": "今週の新顔", "👑": "安定王者"}
-    hero_chips = ""
-    if hero_svg and badge_map:
-        chips = []
-        for code, badge in badge_map.items():
-            item = next((i for i in scored if i["item_code"] == code), None)
-            if item and code in color_map:
-                c  = color_map[code]
-                nm = item["item_name"][:16] + ("…" if len(item["item_name"]) > 16 else "")
-                chips.append(
-                    f'<span class="hchip">'
-                    f'<span class="hchip-dot" style="background:{c}"></span>'
-                    f'{badge} {BADGE_LABEL.get(badge, "")} — {nm}'
-                    f'</span>'
-                )
-        if chips:
-            hero_chips = f'<div class="hero-chips" id="hc-chips">{"".join(chips)}</div>'
-
-    # All charts bundled into hero section via tabs
-    _hc_tabs, _hc_bodies = [], []
-    if hero_svg:
-        _hc_tabs.append('<button class="hctab on" id="hct-ts" onclick="switchHeroChart(\'ts\')">スコア推移</button>')
-        _hc_bodies.append(f'<div id="hc-ts">{hero_svg}</div>')
-    if hm_svg:
-        _hc_tabs.append('<button class="hctab" id="hct-hm" onclick="switchHeroChart(\'hm\')">ランク動向</button>')
-        _hc_bodies.append(f'<div id="hc-hm" style="display:none">{hm_svg}</div>')
-    if vel_svg:
-        _hc_tabs.append('<button class="hctab" id="hct-vel" onclick="switchHeroChart(\'vel\')">口コミ勢い</button>')
-        _hc_bodies.append(f'<div id="hc-vel" style="display:none">{vel_svg}</div>')
-    if anim_ctrl:
-        _hc_tabs.append('<button class="hctab" id="hct-anim" onclick="switchHeroChart(\'anim\')">市場推移</button>')
-        _hc_bodies.append(f'<div id="hc-anim" style="display:none">{anim_ctrl}</div>')
-    if bubble:
-        _hc_tabs.append('<button class="hctab" id="hct-bb" onclick="switchHeroChart(\'bb\')">価格マップ</button>')
-        _hc_bodies.append(
-            f'<div id="hc-bb" style="display:none">'
-            f'<p class="chart-sub">縦軸:口コミスコア ｜ 横軸:価格 ｜ ○の大きさ:口コミ件数</p>'
-            f'{bubble}</div>'
-        )
-    hero_tabs_html   = f'<div class="hc-tabs">{"".join(_hc_tabs)}</div>' if _hc_tabs else ""
-    hero_bodies_html = "".join(_hc_bodies)
-    chart_html = ""  # all charts are now inside the hero section
-
-    # podium
-    rank_labels = ["🥇 1位", "🥈 2位", "🥉 3位"]
-    podium_html = "".join(render_podium(i, rank_labels[i["rank"]-1], emoji) for i in top3)
-
-    # grid
-    rest_html  = "".join(render_card(i, emoji) for i in rest)
-    norev_html = (f'<div class="norev-hd">評価データなし（{len(no_rev)}件）</div>'
-                  f'<div class="cgrid">{"".join(render_card(i,emoji) for i in no_rev)}</div>') if no_rev else ""
-
-    # related
-    rel_pills = "".join(
-        f'<a class="rpill" href="../{GENRE_META[k]["slug"]}/">{GENRE_META[k]["emoji"]} {GENRE_META[k]["label"]}</a>'
-        for k in m.get("related",[]) if k in GENRE_META
-    ) + f'<a class="rpill" href="../">🏠 全ジャンル一覧</a>'
-
-    # item_codes for live price fetch (top 10)
-    live_codes = json.dumps([i["item_code"] for i in scored[:10]], ensure_ascii=False)
-
-    return f"""<!DOCTYPE html>
-<html lang="ja">
-<head>
-<meta charset="UTF-8">
-<meta name="viewport" content="width=device-width,initial-scale=1">
-<title>{label} 口コミランキング {year}年 | {SITE_NAME}</title>
-<meta name="description" content="{desc}">
-<meta name="robots" content="index,follow">
-<link rel="canonical" href="{page_url}">
-<meta property="og:type" content="website">
-<meta property="og:title" content="{label} 口コミランキング {year}年 | {SITE_NAME}">
-<meta property="og:description" content="{desc}">
-<meta property="og:url" content="{page_url}">
-<meta name="twitter:card" content="summary">
-<meta name="twitter:title" content="{label} 口コミランキング {year}年 | {SITE_NAME}">
-<meta name="twitter:description" content="{desc}">
-<script type="application/ld+json">{jsonld}</script>
-<script type="application/ld+json">{breadcrumb_ld}</script>
-<script type="application/ld+json">{faq_ld}</script>
-<style>{CSS}</style>
-</head>
-<body>
-
-<nav class="nav">
-  <div class="nav-in">
-    <a class="nav-logo" href="../">{SITE_NAME}<span>口コミスコアランキング</span></a>
-    <div class="nav-sep"></div>
-    <span class="nav-genre">{emoji} {label}</span>
-    <span class="nav-date" id="upd">{latest_date}</span>
-    <span class="nav-live" id="live-ind" style="display:none">LIVE</span>
-  </div>
-</nav>
-
-<div class="bc"><a href="../">トップ</a><span class="bc-sep">/</span><span>{label}</span></div>
-
-<header class="hero">
-  <div class="hero-in">
-    <p class="eyebrow">{SITE_NAME} — 独自口コミスコアランキング</p>
-    <h1 class="h1">{emoji} {label}<br><em>口コミランキング</em> {year}年版</h1>
-    <p class="hero-sub">{desc}</p>
-    <div class="hero-badges">
-      <span class="hbadge">{len(scored)}製品を分析</span>
-      <span class="hbadge">{rc_total:,}件のレビューを集計</span>
-      <span class="hbadge a">楽天公式とは別集計</span>
-      <span class="hbadge m" id="upd-badge">{latest_date} 更新</span>
-    </div>
-    {hero_tabs_html}
-    <div class="hero-chart-box">{hero_bodies_html}</div>
-    {hero_chips}
-    <div class="fband">
-      <span class="fform">📊 独自スコア：口コミ件数が多く・評価が高く・最近注目されている製品ほど上位</span>
-      <span class="fdesc">楽天の売れ筋順位とは別に、<strong>口コミの量・質・勢い</strong>の3つで計算した独自ランキングです。</span>
-    </div>
-  </div>
-</header>
-
-{"<div class='best3-sec'><div class='best3-hd'>リアルタイム ベスト3<span class='live-tag'>LIVE</span></div><div class='podium'>" + podium_html + "</div></div>" if top3 else ""}
-
-{trend_html}
-
-{"<div class='sec'><div class='sec-hd'>4位以下 — 口コミスコア順</div><div class='cgrid'>" + rest_html + "</div>" + norev_html + "</div>" if rest else ""}
-
-<nav class="related"><div class="rel-hd">関連ジャンル</div><div class="rel-grid">{rel_pills}</div></nav>
-
-<footer class="footer">
-  <p>楽天市場のレビューデータをもとに独自スコアで並べ替えたランキングです。楽天の売れ筋順位とは異なります。</p>
-  <p>価格は随時更新されます。本ページには<a href="https://affiliate.rakuten.co.jp/" rel="noopener">楽天アフィリエイト</a>リンクが含まれます。</p>
-  <p>© {year} {SITE_NAME}</p>
-</footer>
-
-<div id="btip"></div>
-
-<script>
-// ── ヒーローチャート切り替え ──
-function switchHeroChart(t) {{
-  ['ts','hm','vel','anim','bb'].forEach(function(k){{
-    var w=document.getElementById('hc-'+k);
-    var b=document.getElementById('hct-'+k);
-    if(w) w.style.display=k===t?'':'none';
-    if(b) b.className=k===t?'hctab on':'hctab';
-  }});
-  var chips=document.getElementById('hc-chips');
-  if(chips) chips.style.display=t==='ts'?'':'none';
-}}
-
-// ── バブルチャートツールチップ ──
-(function() {{
-  const tip = document.getElementById('btip');
-  if (!tip) return;
-  document.querySelectorAll('.bc').forEach(el => {{
-    el.addEventListener('mouseenter', () => {{
-      tip.innerHTML = '<strong style="font-size:11px;line-height:1.5">' + el.dataset.n + '</strong><br>'
-        + '<span style="font-family:monospace;font-size:14px;font-weight:700">' + el.dataset.p + '</span><br>'
-        + '<span style="color:var(--ink3);font-size:11px">スコア ' + el.dataset.s
-        + ' &nbsp;|&nbsp; ' + el.dataset.r + '位 &nbsp;|&nbsp; ' + el.dataset.c + '件</span>';
-      tip.style.display = 'block';
-    }});
-    el.addEventListener('mousemove', e => {{
-      tip.style.left = (e.clientX + 16) + 'px';
-      tip.style.top  = (e.clientY - 10) + 'px';
-    }});
-    el.addEventListener('mouseleave', () => {{ tip.style.display = 'none'; }});
-  }});
-}})();
-
-// ── リアルタイムデータ取得（価格・口コミ件数・評価）──
-(function() {{
-  const APP_ID = '{APP_ID}';
-  const CODES  = {live_codes};
-  if (!APP_ID || !CODES.length) return;
-
-  async function fetchLiveData(code) {{
-    const url = 'https://app.rakuten.co.jp/services/api/IchibaItem/Search/20170706'
-      + '?format=json&applicationId=' + APP_ID
-      + '&itemCode=' + encodeURIComponent(code) + '&hits=1';
-    const d = await (await fetch(url)).json();
-    const it = d.Items?.[0]?.Item;
-    if (!it) return null;
-    return {{ p: it.itemPrice, rc: it.reviewCount, ra: it.reviewAverage }};
-  }}
-
-  function animCount(el, from, to) {{
-    if (from === to) return;
-    const dur = Math.min(1200, Math.abs(to - from) * 40);
-    const start = Date.now();
-    el.classList.add('live-rc');
-    (function tick() {{
-      const t = Math.min((Date.now() - start) / dur, 1);
-      const ease = 1 - Math.pow(1 - t, 3);
-      el.textContent = Math.round(from + (to - from) * ease).toLocaleString('ja-JP') + '件';
-      if (t < 1) requestAnimationFrame(tick);
-      else {{
-        el.classList.add('live-rc-flash');
-        setTimeout(function() {{ el.classList.remove('live-rc-flash'); }}, 600);
-      }}
-    }})();
-  }}
-
-  function applyLive(code, d) {{
-    const prEl = document.querySelector('[data-live="' + code + '"]');
-    if (prEl && d.p != null) {{
-      prEl.textContent = '¥' + d.p.toLocaleString('ja-JP');
-      prEl.classList.add('live-ok');
-    }}
-    const rcEl = document.querySelector('[data-live-rc="' + code + '"]');
-    if (rcEl && d.rc != null) {{
-      const from = parseInt(rcEl.textContent.replace(/[^0-9]/g, ''), 10) || d.rc;
-      animCount(rcEl, from, d.rc);
-    }}
-    const raEl = document.querySelector('[data-live-ra="' + code + '"]');
-    if (raEl && d.ra != null) raEl.textContent = d.ra.toFixed(2);
-    const sfEl = document.querySelector('[data-live-sf="' + code + '"]');
-    if (sfEl && d.ra != null) sfEl.style.width = (d.ra / 5 * 100).toFixed(1) + '%';
-  }}
-
-  async function run() {{
-    const ind = document.getElementById('live-ind');
-    for (const code of CODES.slice(0, 3)) {{
-      const prEl = document.querySelector('[data-live="' + code + '"]');
-      if (prEl) prEl.classList.add('live-loading');
-      try {{
-        const d = await fetchLiveData(code);
-        if (d) applyLive(code, d);
-      }} catch(e) {{}}
-      if (prEl) prEl.classList.remove('live-loading');
-      await new Promise(r => setTimeout(r, 400));
-    }}
-    if (ind) ind.style.display = '';
-    if ('requestIdleCallback' in window) {{
-      requestIdleCallback(async function() {{
-        for (const code of CODES.slice(3)) {{
-          try {{ const d = await fetchLiveData(code); if (d) applyLive(code, d); }} catch(e) {{}}
-          await new Promise(r => setTimeout(r, 500));
-        }}
-      }});
-    }}
-  }}
-
-  run().catch(function() {{}});
-}})();
-{anim_js}
-</script>
-
-</body>
-</html>"""
-
-# ── トップページ ────────────────────────────────────────────
+# ── カテゴリ順 (インデックス用) ──────────────────────────────
 CATEGORY_ORDER = [
     ("ランニング",           ["running_shoes","running_watch"]),
     ("ゴルフ",               ["golf_club","golf_ball","golf_shoes","golf_bag"]),
@@ -1507,6 +913,239 @@ CATEGORY_ORDER = [
     ("自転車",               ["e_bike"]),
 ]
 
+# ── ジャンルページ生成 ───────────────────────────────────────
+def build_genre_page(key):
+    if key not in GENRE_META: return
+    m     = GENRE_META[key]
+    slug  = m["slug"]
+    label = m["label"]
+    emoji = m["emoji"]
+    year  = date.today().year
+
+    # データ読み込み
+    rows = conn.execute("""
+        SELECT rank, item_code, item_name, item_price,
+               review_count, review_average, item_url, affiliate_url,
+               image_url, shop_name
+        FROM item_rankings WHERE genre_key=? AND fetched_date=?
+        ORDER BY rank LIMIT 90
+    """, (key, latest_date)).fetchall()
+
+    if not rows:
+        print(f"  [SKIP] {key} — データなし ({latest_date})", file=sys.stderr)
+        return
+
+    items = [dict(r) for r in rows]
+    for item in items:
+        item['item_name']    = clean_name(item['item_name'] or '')
+        item['genre_key']    = key
+
+    # スコア計算
+    k_scores  = compute_kuchikomi(items)
+    c_scores  = compute_cospa(key, items, latest_date)
+    b_results = compute_buzz(key, items, latest_date)
+    rv_scores = compute_revrank(k_scores, c_scores, b_results)
+
+    # RevRankスコア順ソート
+    items.sort(key=lambda i: (
+        rv_scores.get(i['item_code'], (None, True))[0] or -1,
+        k_scores.get(i['item_code']) or -1
+    ), reverse=True)
+
+    # 上位20件の画像をプリフェッチ
+    for idx, item in enumerate(items[:20]):
+        item['img'] = fetch_datauri(item.get('image_url') or '')
+        if idx < 19: time.sleep(0.08)
+    for item in items[20:]:
+        item['img'] = ''
+
+    # ヒーローチャート (上位5)
+    top5      = items[:5]
+    hero_html = render_hero_section(key, top5, latest_date)
+
+    # 製品カード (上位20)
+    cards_html = []
+    for rank, item in enumerate(items[:20], 1):
+        code   = item['item_code']
+        color  = PCOLS[rank-1] if rank <= len(PCOLS) else '#64748b'
+        k_sc   = k_scores.get(code)
+        c_sc   = c_scores.get(code)
+        b_sc, b_label, _ = b_results.get(code, (None, '', ''))
+        rv, is_prov = rv_scores.get(code, (None, True))
+        meta   = get_meta(key, code, latest_date)
+        if rank == 4:
+            cards_html.append('<div class="rank-divider">4位以下</div>')
+        cards_html.append(render_pcard(rank, color, item, k_sc, c_sc, b_sc, b_label, rv, is_prov, meta))
+
+    # タブ切替用データ
+    items_json = json.dumps([{
+        'code': i['item_code'],
+        'k':    k_scores.get(i['item_code']),
+        'c':    c_scores.get(i['item_code']),
+        'b':    (b_results.get(i['item_code']) or (None,))[0],
+        'rv':   (rv_scores.get(i['item_code']) or (None,))[0],
+    } for i in items[:20]], ensure_ascii=False)
+
+    # 関連リンク
+    related = [GENRE_META[k] for k in m.get('related', []) if k in GENRE_META]
+    rel_html = (''.join(
+        f'<a class="rel-link" href="../{r["slug"]}/">{r["emoji"]} {r["label"]}</a>'
+        for r in related
+    ) + f'<a class="rel-link" href="../">🏠 全ジャンル</a>')
+
+    # JSON-LD
+    reviewed = [i for i in items if (i.get('review_count') or 0) > 0]
+    ld_items = [{"@type":"ListItem","position":rank+1,"item":{
+        "@type":"Product","name":i["item_name"],"url":i.get("item_url",""),
+        "offers":{"@type":"Offer","price":str(i.get("item_price") or 0),"priceCurrency":"JPY"},
+        "aggregateRating":{"@type":"AggregateRating",
+            "ratingValue":str(i["review_average"]),"reviewCount":str(i["review_count"])},
+    }} for rank, i in enumerate(reviewed[:10])]
+    jsonld = json.dumps({"@context":"https://schema.org","@type":"ItemList",
+        "name":f"{label} RevRankランキング","url":f"{BASE_URL}/{slug}/",
+        "itemListElement":ld_items}, ensure_ascii=False, separators=(',',':'))
+
+    page_url = f"{BASE_URL}/{slug}/"
+    rc_total = sum(i.get('review_count') or 0 for i in reviewed)
+
+    html = f"""<!DOCTYPE html>
+<html lang="ja">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>{label}ランキング {year}年 | RevRank</title>
+<meta name="description" content="{m['desc']}">
+<meta name="robots" content="index,follow">
+<link rel="canonical" href="{page_url}">
+<meta property="og:title" content="{label}ランキング {year}年 | RevRank">
+<meta property="og:description" content="{m['desc']}">
+<meta property="og:url" content="{page_url}">
+<script type="application/ld+json">{jsonld}</script>
+<style>{CSS}</style>
+</head>
+<body>
+
+<div class="page-header">
+  <div class="site-eye">Rev<span>Rank · {emoji} {label}</span></div>
+  <div class="genre-h">{label}ランキング</div>
+  <div class="genre-sub">楽天市場の上位製品を口コミ・コスパ・バズの3指標で分析 · {latest_date}更新</div>
+  <div class="tabs">
+    <div class="tab active" data-sort="rv">総合</div>
+    <div class="tab" data-sort="k">口コミ順</div>
+    <div class="tab" data-sort="c">コスパ順</div>
+    <div class="tab" data-sort="b">急上昇</div>
+  </div>
+</div>
+
+<div class="hero">{hero_html}</div>
+
+<div class="list-wrap" id="pcard-list">
+  {"".join(cards_html)}
+</div>
+
+<div class="related">
+  <div class="rel-hd">関連ジャンル</div>
+  <div class="rel-links">{rel_html}</div>
+</div>
+
+<script>
+(function(){{
+  if(localStorage.getItem('rrAdmin')) return;
+  var w='{WORKER_URL}';
+  if(!w) return;
+  try{{ fetch(w+'/track',{{method:'POST',headers:{{'Content-Type':'application/json'}},
+    body:JSON.stringify({{p:location.pathname,r:document.referrer}}),keepalive:true}}).catch(function(){{}}); }}catch(e){{}}
+}})();
+</script>
+<footer class="footer">
+  <p>楽天市場のレビューデータをもとに独自スコア (RevRank) で並べ替えたランキングです。楽天の売れ筋順位とは異なります。</p>
+  <p>本ページには楽天アフィリエイトリンクが含まれます。更新: {latest_date} · {rc_total:,}件のレビューを集計</p>
+  <p>© {year} RevRank</p>
+</footer>
+
+<script>
+(function(){{
+  var DATA = {items_json};
+  var list = document.getElementById('pcard-list');
+  if(!list) return;
+
+  var MEDALS = {{1:'🥇',2:'🥈',3:'🥉'}};
+  var TINTS  = {{
+    1:'color-mix(in srgb,var(--gold) 6%,transparent)',
+    2:'color-mix(in srgb,var(--silver) 5%,transparent)',
+    3:'color-mix(in srgb,var(--bronze) 5%,transparent)'
+  }};
+  var RANK_CLS = ['rank-1','rank-2','rank-3'];
+
+  function updateRanks(){{
+    var cards = Array.from(list.querySelectorAll('.pcard'));
+    var divider = list.querySelector('.rank-divider');
+
+    // divider を4位の前に移動
+    if(divider && cards.length > 3) list.insertBefore(divider, cards[3]);
+
+    cards.forEach(function(card, i){{
+      var pos  = i + 1;
+      var rr   = parseInt(card.dataset.rakutenRank) || pos;
+      var diff = rr - pos;
+      var feat = pos <= 3;
+
+      // featured / compact クラス切替
+      card.classList.remove('pcard-feat','pcard-compact');
+      card.classList.add(feat ? 'pcard-feat' : 'pcard-compact');
+      card.style.background = TINTS[pos] || '';
+
+      // メダル + 順位番号
+      var medalEl = card.querySelector('.medal');
+      var nvalEl  = card.querySelector('.rank-n-val');
+      var numEl   = card.querySelector('.rank-num');
+      if(medalEl) medalEl.textContent = MEDALS[pos] || '';
+      if(nvalEl)  nvalEl.textContent  = pos;
+      if(numEl)   numEl.className = 'rank-num ' + (RANK_CLS[i] || 'rank-n');
+
+      // 楽天順位
+      var rEl = card.querySelector('.rank-r');
+      if(rEl) rEl.textContent = '楽天 ' + rr + '位';
+
+      // 差分バッジ
+      var diffEl = card.querySelector('.rank-diff');
+      if(diffEl){{
+        if(Math.abs(diff) >= 3){{
+          diffEl.style.display = '';
+          diffEl.className = 'rank-diff ' + (diff > 0 ? 'gem' : 'overr');
+          diffEl.textContent = diff > 0 ? '楽天比 +'+diff+'↑' : '楽天比 '+diff+'↓';
+        }} else {{
+          diffEl.style.display = 'none';
+        }}
+      }}
+    }});
+  }}
+
+  document.querySelectorAll('.tab').forEach(function(tab){{
+    tab.addEventListener('click', function(){{
+      document.querySelectorAll('.tab').forEach(function(t){{t.classList.remove('active');}});
+      tab.classList.add('active');
+      var key = tab.dataset.sort;
+      var sorted = DATA.slice().sort(function(a,b){{return (b[key]??-1)-(a[key]??-1);}});
+      sorted.forEach(function(d){{
+        var card = list.querySelector('[data-code="'+d.code+'"]');
+        if(card) list.appendChild(card);
+      }});
+      updateRanks();
+    }});
+  }});
+}})();
+</script>
+
+</body>
+</html>"""
+
+    out = DOCS_DIR / slug
+    out.mkdir(parents=True, exist_ok=True)
+    (out / "index.html").write_text(html, encoding="utf-8")
+    print(f"  [OK] {key} → {slug}/index.html ({len(html):,} bytes)", file=sys.stderr)
+
+# ── トップページ ─────────────────────────────────────────────
 def build_index(genre_counts):
     year = date.today().year
     sections = []
@@ -1518,102 +1157,295 @@ def build_index(genre_counts):
             f'<span class="in">{genre_counts.get(k,0)}件収録</span></a>'
             for k in keys if k in GENRE_META
         )
-        sections.append(
-            f'<div class="icat"><h2 class="ich">{cat}</h2><div class="igrid">{cards}</div></div>'
-        )
+        sections.append(f'<div class="icat"><h2 class="ich">{cat}</h2><div class="igrid">{cards}</div></div>')
 
     return f"""<!DOCTYPE html>
 <html lang="ja">
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width,initial-scale=1">
-<title>{SITE_NAME} — 口コミスコアで選ぶ、本当のランキング</title>
-<meta name="description" content="楽天市場の口コミ件数と評価点から独自スコアを算出し、売れ筋とは異なる本当の評価ランキングを29ジャンルで提供。">
+<title>RevRank — 口コミ・コスパ・バズで選ぶ本当のランキング</title>
+<meta name="description" content="楽天市場の製品を口コミランク・コスパランク・バズランクの3指標で独自分析。売れ筋とは違う本当の評価ランキングを31ジャンルで提供。">
 <meta name="robots" content="index,follow">
 <link rel="canonical" href="{BASE_URL}/">
-<meta property="og:type" content="website">
-<meta property="og:title" content="{SITE_NAME} — 口コミスコアで選ぶ、本当のランキング">
-<meta property="og:description" content="楽天市場の口コミ件数と評価点から独自スコアを算出し、売れ筋とは異なる本当の評価ランキングを29ジャンルで提供。">
-<meta property="og:url" content="{BASE_URL}/">
-<meta name="twitter:card" content="summary">
-<meta name="twitter:title" content="{SITE_NAME} — 口コミスコアで選ぶ、本当のランキング">
-<meta name="twitter:description" content="楽天市場の口コミ件数と評価点から独自スコアを算出し、売れ筋とは異なる本当の評価ランキングを29ジャンルで提供。">
-<script type="application/ld+json">{{"@context":"https://schema.org","@type":"WebSite","name":"{SITE_NAME}","url":"{BASE_URL}/","description":"楽天市場の口コミ件数と評価点から独自スコアを算出し、売れ筋とは異なる本当の評価ランキングを29ジャンルで提供。"}}</script>
-<style>
-{CSS}
-.top-hero{{background:var(--sur);border-bottom:1px solid var(--bdr);
-  padding:72px 20px 60px;text-align:center}}
-.top-in{{max-width:680px;margin:0 auto}}
-.top-logo{{font-size:48px;font-weight:900;letter-spacing:-.06em;color:var(--acc);margin-bottom:6px}}
-.top-sub{{font-size:16px;color:var(--ink2);line-height:1.7;margin-bottom:22px}}
-.idx{{max-width:1080px;margin:40px auto 60px;padding:0 20px}}
-.icat{{margin-bottom:36px}}
-.ich{{font-size:13px;font-weight:700;color:var(--ink2);letter-spacing:.06em;text-transform:uppercase;
-  display:flex;align-items:center;gap:10px;margin-bottom:14px}}
-.ich::after{{content:'';flex:1;height:1px;background:var(--bdr)}}
-.igrid{{display:grid;grid-template-columns:repeat(auto-fill,minmax(160px,1fr));gap:10px}}
-.ic{{background:var(--sur);border:1px solid var(--bdr);border-radius:var(--r);
-  padding:16px;display:flex;flex-direction:column;gap:4px;
-  transition:border-color .12s,box-shadow .12s,transform .12s}}
-.ic:hover{{border-color:var(--acc);box-shadow:var(--shd);transform:translateY(-2px)}}
-.ie{{font-size:28px;line-height:1;margin-bottom:2px}}
-.il{{font-size:13px;font-weight:700;color:var(--ink);line-height:1.3}}
-.in{{font-size:11px;color:var(--ink3);font-family:var(--mono)}}
-</style>
+<style>{CSS}</style>
 </head>
 <body>
-<nav class="nav"><div class="nav-in">
-  <span class="nav-logo">{SITE_NAME}<span>口コミスコアランキング</span></span>
-  <span class="nav-date">{latest_date} 更新</span>
-</div></nav>
-<header class="top-hero"><div class="top-in">
-  <div class="top-logo">{SITE_NAME}</div>
-  <p class="top-sub">「ランキング1位！」「送料無料！」ではなく、<br>
-  <strong>口コミの質と量</strong>だけで並べた本当のランキング。</p>
-  <div class="hero-badges" style="justify-content:center">
-    <span class="hbadge a">29ジャンル収録</span>
-    <span class="hbadge">楽天公式とは別集計</span>
-    <span class="hbadge m">{latest_date} 更新</span>
+<header class="top-hero">
+  <div class="top-in">
+    <div class="top-logo">RevRank</div>
+    <p class="top-sub">「ランキング1位！」ではなく、<strong>口コミの質・コスパ・話題性</strong>で選ぶ本当のランキング。</p>
+    <div class="top-badges">
+      <span class="top-badge a">31ジャンル収録</span>
+      <span class="top-badge">楽天公式とは別集計</span>
+      <span class="top-badge">毎時更新</span>
+    </div>
   </div>
-</div></header>
+</header>
 <main class="idx">{"".join(sections)}</main>
+<script>
+(function(){{
+  if(localStorage.getItem('rrAdmin')) return;
+  var w='{WORKER_URL}';
+  if(!w) return;
+  try{{ fetch(w+'/track',{{method:'POST',headers:{{'Content-Type':'application/json'}},
+    body:JSON.stringify({{p:location.pathname,r:document.referrer}}),keepalive:true}}).catch(function(){{}}); }}catch(e){{}}
+}})();
+</script>
 <footer class="footer">
   <p>楽天市場のレビューデータをもとに独自スコアで並べ替えたランキングです。本ページには楽天アフィリエイトリンクが含まれます。</p>
-  <p>© {year} {SITE_NAME}</p>
+  <p>© {year} RevRank · 更新: {latest_date}</p>
 </footer>
 </body>
 </html>"""
 
+def build_admin():
+    """管理ページ生成 (docs/admin/index.html)"""
+    year = date.today().year
+    html = f"""<!DOCTYPE html>
+<html lang="ja">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>RevRank Analytics</title>
+<meta name="robots" content="noindex,nofollow">
+<style>
+:root{{
+  --bg:#0a0b15;--sur:#131524;--sur2:#1a1d30;--bdr:#252840;
+  --ink:#e2e5f5;--ink2:#8a8eaa;--ink3:#454968;
+  --acc:#f5b842;--good:#34d399;--warn:#fbbf24;--info:#5b8af8;
+  --r:10px;--sans:-apple-system,BlinkMacSystemFont,'Hiragino Sans',sans-serif;
+}}
+*,*::before,*::after{{box-sizing:border-box;margin:0;padding:0}}
+body{{background:var(--bg);color:var(--ink);font-family:var(--sans);font-size:14px;min-height:100vh}}
+a{{color:inherit;text-decoration:none}}
+.wrap{{max-width:900px;margin:0 auto;padding:24px 16px}}
+.hd{{display:flex;align-items:center;justify-content:space-between;margin-bottom:24px;gap:12px;flex-wrap:wrap}}
+.logo{{font-size:20px;font-weight:900;color:var(--acc)}}
+.logo span{{color:var(--ink2);font-weight:400;font-size:13px}}
+.period-tabs{{display:flex;gap:6px}}
+.ptab{{padding:5px 14px;border-radius:99px;border:1px solid var(--bdr);color:var(--ink2);font-size:12px;font-weight:600;cursor:pointer;background:var(--sur)}}
+.ptab.active{{border-color:var(--acc);color:var(--acc);background:color-mix(in srgb,var(--acc) 10%,transparent)}}
+.kpi-row{{display:grid;grid-template-columns:repeat(auto-fill,minmax(140px,1fr));gap:10px;margin-bottom:20px}}
+.kpi{{background:var(--sur);border:1px solid var(--bdr);border-radius:var(--r);padding:14px 16px}}
+.kpi-lbl{{font-size:11px;color:var(--ink2);font-weight:600;letter-spacing:.06em;text-transform:uppercase;margin-bottom:4px}}
+.kpi-val{{font-size:28px;font-weight:900;color:var(--acc);font-variant-numeric:tabular-nums}}
+.card{{background:var(--sur);border:1px solid var(--bdr);border-radius:var(--r);overflow:hidden;margin-bottom:14px}}
+.card-hd{{padding:12px 16px;border-bottom:1px solid var(--bdr);font-size:12px;font-weight:700;color:var(--ink2);letter-spacing:.06em;text-transform:uppercase}}
+.chart-wrap{{padding:16px;overflow-x:auto}}
+svg.chart{{width:100%;display:block}}
+.page-table{{width:100%;border-collapse:collapse}}
+.page-table th{{padding:8px 12px;text-align:left;font-size:11px;font-weight:700;color:var(--ink3);letter-spacing:.06em;text-transform:uppercase;border-bottom:1px solid var(--bdr)}}
+.page-table td{{padding:8px 12px;border-bottom:1px solid var(--bdr);font-size:13px}}
+.page-table tr:last-child td{{border-bottom:none}}
+.page-table tr:hover td{{background:var(--sur2)}}
+.bar-wrap{{display:flex;align-items:center;gap:8px}}
+.bar{{height:6px;background:var(--acc);border-radius:3px;opacity:.7;flex-shrink:0}}
+.cnt{{color:var(--ink2);font-size:12px;font-variant-numeric:tabular-nums;white-space:nowrap}}
+.recent-list{{padding:0}}
+.rl-item{{display:flex;align-items:baseline;gap:10px;padding:7px 16px;border-bottom:1px solid var(--bdr);font-size:12px}}
+.rl-item:last-child{{border-bottom:none}}
+.rl-page{{color:var(--ink);font-weight:600;flex:1;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}}
+.rl-ref{{color:var(--ink3);font-size:11px;flex:1;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}}
+.rl-time{{color:var(--ink3);font-size:11px;white-space:nowrap}}
+.login{{display:flex;flex-direction:column;align-items:center;justify-content:center;min-height:60vh;gap:16px}}
+.login-box{{background:var(--sur);border:1px solid var(--bdr);border-radius:var(--r);padding:32px;width:100%;max-width:320px;display:flex;flex-direction:column;gap:12px}}
+.login-title{{font-size:16px;font-weight:800;color:var(--acc);text-align:center}}
+input[type=text],input[type=password]{{background:var(--sur2);border:1px solid var(--bdr);border-radius:6px;padding:9px 12px;color:var(--ink);font-size:14px;width:100%;outline:none}}
+input:focus{{border-color:var(--acc)}}
+.btn-login{{background:var(--acc);color:#000;font-weight:800;font-size:14px;border:none;border-radius:6px;padding:10px;cursor:pointer;width:100%}}
+.err{{color:var(--warn);font-size:12px;text-align:center}}
+#main{{display:none}}
+</style>
+</head>
+<body>
+<div class="wrap">
+  <div id="login-view" class="login">
+    <div class="login-box">
+      <div class="login-title">RevRank Analytics</div>
+      <input type="password" id="key-input" placeholder="管理キー" autocomplete="current-password">
+      <button class="btn-login" onclick="doLogin()">ログイン</button>
+      <div class="err" id="err-msg"></div>
+    </div>
+  </div>
+
+  <div id="main">
+    <div class="hd">
+      <div class="logo">RevRank <span>Analytics</span></div>
+      <div class="period-tabs">
+        <div class="ptab active" data-d="7">7日</div>
+        <div class="ptab" data-d="30">30日</div>
+        <div class="ptab" data-d="90">90日</div>
+      </div>
+    </div>
+    <div class="kpi-row" id="kpi-row"></div>
+    <div class="card">
+      <div class="card-hd">日別PV</div>
+      <div class="chart-wrap" id="day-chart"></div>
+    </div>
+    <div class="card">
+      <div class="card-hd">ページ別PV</div>
+      <table class="page-table" id="page-table">
+        <thead><tr><th>ページ</th><th>PV</th><th></th></tr></thead>
+        <tbody></tbody>
+      </table>
+    </div>
+    <div class="card">
+      <div class="card-hd">直近アクセス</div>
+      <ul class="recent-list" id="recent-list"></ul>
+    </div>
+  </div>
+</div>
+
+<script>
+var WORKER = '{WORKER_URL}';
+var adminKey = '';
+
+function doLogin() {{
+  var k = document.getElementById('key-input').value.trim();
+  if (!k) return;
+  adminKey = k;
+  load(30);
+}}
+
+document.getElementById('key-input').addEventListener('keydown', function(e) {{
+  if (e.key === 'Enter') doLogin();
+}});
+
+// URL パラメータからキーを自動読み込み
+(function() {{
+  var p = new URLSearchParams(location.search).get('key');
+  if (p) {{ adminKey = p; load(30); }}
+}})();
+
+document.querySelectorAll('.ptab').forEach(function(t) {{
+  t.addEventListener('click', function() {{
+    document.querySelectorAll('.ptab').forEach(function(x) {{ x.classList.remove('active'); }});
+    t.classList.add('active');
+    load(parseInt(t.dataset.d));
+  }});
+}});
+
+function load(days) {{
+  fetch(WORKER + '/stats?days=' + days, {{
+    headers: {{'X-Admin-Key': adminKey}}
+  }})
+  .then(function(r) {{
+    if (r.status === 401) {{
+      document.getElementById('err-msg').textContent = 'キーが違います';
+      return null;
+    }}
+    return r.json();
+  }})
+  .then(function(d) {{
+    if (!d) return;
+    // 自己除外フラグをセット
+    localStorage.setItem('rrAdmin', '1');
+    document.getElementById('login-view').style.display = 'none';
+    document.getElementById('main').style.display = 'block';
+    renderKpi(d, days);
+    renderChart(d.by_day);
+    renderPages(d.by_page);
+    renderRecent(d.recent);
+  }})
+  .catch(function(e) {{
+    document.getElementById('err-msg').textContent = 'エラー: ' + e.message;
+  }});
+}}
+
+function renderKpi(d, days) {{
+  var byDay = d.by_day || [];
+  var today = byDay.length ? byDay[byDay.length-1].count : 0;
+  var pages = new Set((d.by_page||[]).map(function(p){{return p.page;}})).size;
+  document.getElementById('kpi-row').innerHTML =
+    kpiCard('総PV', d.total, '過去' + days + '日') +
+    kpiCard('本日PV', today, '今日') +
+    kpiCard('ページ数', pages, 'アクセスあり');
+}}
+function kpiCard(lbl, val, sub) {{
+  return '<div class="kpi"><div class="kpi-lbl">'+lbl+'</div><div class="kpi-val">'+(val||0).toLocaleString()+'</div><div style="font-size:11px;color:var(--ink3);margin-top:2px">'+sub+'</div></div>';
+}}
+
+function renderChart(byDay) {{
+  if (!byDay || !byDay.length) {{ document.getElementById('day-chart').innerHTML='<p style="color:var(--ink3);padding:16px;font-size:12px">データなし</p>'; return; }}
+  var W=800, H=120, PL=36, PR=W-8, PT=8, PB=H-20, PW=PR-PL, PH=PB-PT;
+  var counts = byDay.map(function(r){{return r.count;}});
+  var mx = Math.max.apply(null, counts) || 1;
+  function x(i){{ return PL + i/(byDay.length-1||1)*PW; }}
+  function y(v){{ return PB - v/mx*PH; }}
+  var pts = byDay.map(function(r,i){{return x(i).toFixed(1)+','+y(r.count).toFixed(1);}}).join(' ');
+  var area = x(0).toFixed(1)+','+PB+' '+pts+' '+x(byDay.length-1).toFixed(1)+','+PB;
+  var ticks = '';
+  [0, Math.round(byDay.length/2), byDay.length-1].forEach(function(i){{
+    if(byDay[i]) ticks += '<text x="'+x(i).toFixed(1)+'" y="'+(PB+14)+'" text-anchor="middle" font-size="9" fill="var(--ink3)">'+byDay[i].date.slice(5)+'</text>';
+  }});
+  document.getElementById('day-chart').innerHTML =
+    '<svg class="chart" viewBox="0 0 '+W+' '+H+'">' +
+    '<polygon points="'+area+'" fill="var(--acc)" fill-opacity=".12"/>' +
+    '<polyline points="'+pts+'" fill="none" stroke="var(--acc)" stroke-width="2" stroke-linejoin="round"/>' +
+    ticks + '</svg>';
+}}
+
+function renderPages(byPage) {{
+  if (!byPage || !byPage.length) return;
+  var mx = byPage[0].count;
+  var rows = byPage.map(function(p, i) {{
+    var pct = Math.round(p.count/mx*100);
+    var label = p.page.replace(/\\/$/,'').split('/').pop() || 'トップ';
+    return '<tr><td>'+label+'<div style="font-size:10px;color:var(--ink3)">'+p.page+'</div></td>' +
+      '<td style="font-variant-numeric:tabular-nums">'+p.count.toLocaleString()+'</td>' +
+      '<td style="width:120px"><div class="bar-wrap"><div class="bar" style="width:'+pct+'px"></div></div></td></tr>';
+  }}).join('');
+  document.querySelector('#page-table tbody').innerHTML = rows;
+}}
+
+function renderRecent(recent) {{
+  if (!recent || !recent.length) return;
+  document.getElementById('recent-list').innerHTML = recent.map(function(r) {{
+    var t = r.viewed_at ? r.viewed_at.replace('T',' ').slice(0,16) : '';
+    var ref = r.referrer ? r.referrer.replace(/^https?:\\/\\/[^\\/]+/,'') || r.referrer : '直接';
+    return '<li class="rl-item"><span class="rl-page">'+r.page+'</span><span class="rl-ref">from: '+ref+'</span><span class="rl-time">'+t+'</span></li>';
+  }}).join('');
+}}
+</script>
+</body>
+</html>"""
+    out = DOCS_DIR / "admin"
+    out.mkdir(parents=True, exist_ok=True)
+    (out / "index.html").write_text(html, encoding="utf-8")
+    print(f"→ docs/admin/index.html ({len(html):,} bytes)", file=sys.stderr)
+
 def build_sitemap(built):
     today = date.today().isoformat()
-    urls = [f'  <url><loc>{BASE_URL}/</loc><lastmod>{today}</lastmod><changefreq>hourly</changefreq><priority>1.0</priority></url>']
+    urls  = [f'  <url><loc>{BASE_URL}/</loc><lastmod>{today}</lastmod><changefreq>hourly</changefreq><priority>1.0</priority></url>']
     for key in built:
         if key in GENRE_META:
-            urls.append(f'  <url><loc>{BASE_URL}/{GENRE_META[key]["slug"]}/</loc><lastmod>{today}</lastmod><changefreq>hourly</changefreq><priority>0.8</priority></url>')
+            slug = GENRE_META[key]["slug"]
+            urls.append(f'  <url><loc>{BASE_URL}/{slug}/</loc><lastmod>{today}</lastmod><changefreq>hourly</changefreq><priority>0.8</priority></url>')
     return f'<?xml version="1.0" encoding="UTF-8"?>\n<urlset xmlns="http://www.sitemaps.org/schemas/sitemap/0.9">\n{chr(10).join(urls)}\n</urlset>'
 
-# ── メイン ──────────────────────────────────────────────────
+# ── メイン ───────────────────────────────────────────────────
 def main():
+    if not latest_date:
+        print("DBにデータがありません。先に fetch_ranking.py を実行してください。", file=sys.stderr)
+        sys.exit(1)
+
     target = sys.argv[1] if len(sys.argv) > 1 else None
     keys   = [target] if target else list(GENRE_META.keys())
-    genre_counts = {}; built = []
+    built  = []
+    genre_counts = {}
 
     for key in keys:
         if key not in GENRE_META:
             print(f"Unknown: {key}", file=sys.stderr); continue
-        m = GENRE_META[key]
-        print(f"\n── {m['label']} ──", file=sys.stderr)
-        items = load_genre(key)
-        if not items:
-            print(f"  No data, skipping", file=sys.stderr); continue
-        prefetch_images(items, m["label"])
-        genre_counts[key] = len([i for i in items if i["review_count"] > 0])
-        html = build_genre_page(key, items)
-        out  = DOCS_DIR / m["slug"]
-        out.mkdir(parents=True, exist_ok=True)
-        (out / "index.html").write_text(html, encoding="utf-8")
-        print(f"  → docs/{m['slug']}/index.html ({len(html):,} bytes)", file=sys.stderr)
-        built.append(key)
+        print(f"\n── {GENRE_META[key]['label']} ──", file=sys.stderr)
+        build_genre_page(key)
+        cnt = conn.execute(
+            "SELECT COUNT(*) FROM item_rankings WHERE genre_key=? AND fetched_date=?",
+            (key, latest_date)).fetchone()[0]
+        if cnt > 0:
+            genre_counts[key] = cnt
+            built.append(key)
 
     if not target:
         idx = build_index(genre_counts)
@@ -1625,8 +1457,10 @@ def main():
         robots = f"User-agent: *\nAllow: /\nSitemap: {BASE_URL}/sitemap.xml\n"
         (DOCS_DIR / "robots.txt").write_text(robots, encoding="utf-8")
         print(f"→ docs/robots.txt", file=sys.stderr)
+        build_admin()
+        print(f"→ docs/admin/index.html", file=sys.stderr)
 
-    print(f"\n✓ Built {len(built)} pages → {DOCS_DIR}", file=sys.stderr)
+    print(f"\n✓ {len(built)}ジャンル生成完了 → {DOCS_DIR}", file=sys.stderr)
 
 if __name__ == "__main__":
     main()
