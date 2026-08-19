@@ -1,0 +1,52 @@
+name: Daily Community Mentions
+
+on:
+  schedule:
+    - cron: '0 2 * * *'   # 毎日 02:00 UTC (= 11:00 JST)
+  workflow_dispatch:        # 手動実行ボタン
+
+concurrency:
+  group: fetch-mentions
+  cancel-in-progress: false
+
+permissions:
+  contents: write
+
+jobs:
+  collect:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 1
+
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+          cache: 'pip'
+
+      - name: Install dependencies
+        run: pip install requests beautifulsoup4
+
+      - name: Fetch community mentions
+        run: python fetch_mentions.py
+        env:
+          REDDIT_CLIENT_ID:     ${{ secrets.REDDIT_CLIENT_ID }}
+          REDDIT_CLIENT_SECRET: ${{ secrets.REDDIT_CLIENT_SECRET }}
+
+      - name: Commit & push
+        run: |
+          git config user.name  "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git add data/ichiba_ranking.db data/community_state.json
+          git diff --staged --quiet && echo "変更なし、スキップ" && exit 0
+          git commit -m "chore: community mentions $(date -u '+%Y-%m-%d')"
+          for i in 1 2 3; do
+            git pull --rebase origin main && git push && break
+            echo "Push失敗 (${i}/3)、5秒後リトライ..."
+            sleep 5
+          done

@@ -3,3 +3,5 @@ python-dotenv
 pandas
 matplotlib
 holidays
+beautifulsoup4
+feedparser

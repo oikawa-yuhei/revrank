@@ -17,7 +17,7 @@ from dotenv import load_dotenv
 
 from ichiba.client import IchibaApiError, fetch_ranking
 from ichiba.config import GENRES, REQUEST_INTERVAL
-from ichiba.db import init_db, save_ranking_items
+from ichiba.db import init_db, save_ranking_items, save_snapshot_items
 
 
 def main():
@@ -49,6 +49,11 @@ def main():
 
     for i, key in enumerate(target_keys):
         genre = GENRES[key]
+
+        if genre["id"] == 0:
+            print(f"[SKIP] {key} ({genre['label']}): genre_id 未設定。tools/find_genre.py で確認してください")
+            continue
+
         if i > 0:
             time.sleep(REQUEST_INTERVAL)
 
@@ -56,6 +61,7 @@ def main():
             items = fetch_ranking(app_id, access_key, origin, genre["id"],
                                   affiliate_id=affiliate_id)
             save_ranking_items(fetched_date, genre["id"], key, items)
+            save_snapshot_items(fetched_date, key, items)
             print(f"[OK] {key} ({genre['label']}) {len(items)}件")
             total_ok += 1
         except IchibaApiError as e:
