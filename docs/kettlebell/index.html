@@ -947,7 +947,7 @@ button{cursor:pointer;border:none;background:none;font:inherit;color:inherit}
 <script>
 (function(){
   if(localStorage.getItem('rrAdmin')) return;
-  var w='';
+  var w='https://revrank-analytics.revrank-api.workers.dev';
   if(!w) return;
   try{ fetch(w+'/track',{method:'POST',headers:{'Content-Type':'application/json'},
     body:JSON.stringify({p:location.pathname,r:document.referrer}),keepalive:true}).catch(function(){}); }catch(e){}
