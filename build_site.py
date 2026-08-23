@@ -522,7 +522,7 @@ def _hero_legend(series_list):
 def load_hero_data(key, top5, today_str):
     since = (date.fromisoformat(today_str) - timedelta(days=90)).isoformat()
     codes = [i['item_code'] for i in top5]
-    if not codes: return [], [], []
+    if not codes: return [], [], [], 0
 
     ph   = ','.join('?' * len(codes))
     rows = conn.execute(f"""
@@ -541,7 +541,7 @@ def load_hero_data(key, top5, today_str):
     avg_ra = sum(i['review_average'] for i in reviewed) / len(reviewed) if reviewed else 4.0
 
     all_dates = sorted(set(r['fetched_date'] for recs in hist.values() for r in recs))
-    if not all_dates: return [], [], []
+    if not all_dates: return [], [], [], 0
 
     # 口コミランク時系列
     k_raw = []
@@ -564,11 +564,14 @@ def load_hero_data(key, top5, today_str):
         k_series = k_raw
 
     # コスパランク時系列 (アイテム個別の90日価格レンジ基準)
+    # 注意: 確定スコア(compute_cospa)は MIN_DAYS_COSPA 日分たまるまでNoneだが、
+    # グラフは「参考値」として2点(=線が引ける最小数)あれば早期から表示する。
+    # スコアの確定/未確定はここではなく render_hero_section 側のラベルで示す。
     c_series = []
     for code in codes:
         by_d   = {r['fetched_date']: r for r in hist[code]}
         prices = [r['item_price'] for r in hist[code] if r['item_price'] and r['item_price'] > 0]
-        if len(prices) < MIN_DAYS_COSPA:
+        if len(prices) < 2:
             c_series.append((code, [None] * len(all_dates))); continue
         mn_p, mx_p = min(prices), max(prices)
         pts = []
@@ -597,12 +600,13 @@ def load_hero_data(key, top5, today_str):
             else: pts.append(round((mx_r - rk) / (mx_r - mn_r) * 100))
         b_series.append((code, pts))
 
-    return k_series, c_series, b_series
+    return k_series, c_series, b_series, len(all_dates)
 
 def render_hero_section(key, top5, today_str):
-    k_data, c_data, b_data = load_hero_data(key, top5, today_str)
+    k_data, c_data, b_data, n_days = load_hero_data(key, top5, today_str)
     if not k_data:
         return ''
+    cospa_provisional = n_days < MIN_DAYS_COSPA
 
     def build_sl(series_data):
         sl = []
@@ -624,6 +628,9 @@ def render_hero_section(key, top5, today_str):
     svg_b = _hero_svg(sl_b)
     legend = _hero_legend(sl_k)
 
+    cospa_period = (f'過去{n_days}日<span class="prov">暫定(あと{MIN_DAYS_COSPA - n_days}日でスコア確定)</span>'
+                    if cospa_provisional else '過去90日')
+
     return f'''<div class="hero-inner">
   <div class="hero-head">
     <div class="hero-title">ランク推移チャート — 上位5商品</div>
@@ -641,7 +648,7 @@ def render_hero_section(key, top5, today_str):
     <div class="cpanel">
       <div class="cpanel-head">
         <div class="cpanel-title"><span class="kw">コスパ</span>ランク</div>
-        <div class="cpanel-period">過去90日</div>
+        <div class="cpanel-period">{cospa_period}</div>
       </div>
       {svg_c}
     </div>
